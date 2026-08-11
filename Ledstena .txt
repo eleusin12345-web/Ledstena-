@@ -1,0 +1,773 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+getAuth,
+signInAnonymously,
+signInWithCustomToken,
+onAuthStateChanged
+} from 'firebase/auth';
+import {
+getFirestore,
+collection,
+onSnapshot,
+addDoc,
+deleteDoc,
+doc,
+serverTimestamp
+} from 'firebase/firestore';
+import {
+BookOpen,
+PlusCircle,
+Home,
+Upload,
+ChevronLeft,
+Image as ImageIcon,
+Loader2,
+Trash2,
+Library,
+ChevronRight,
+Settings,
+X,
+CheckCircle2
+} from 'lucide-react';
+
+// --- НАСТРОЙКА FIREBASE ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'manga-app-pro';
+
+// --- УТИЛИТЫ ---
+const processImage = (file, isCover = false) => {
+return new Promise((resolve, reject) => {
+const reader = new FileReader();
+reader.onload = (e) => {
+const img = new Image();
+img.onload = () => {
+const canvas = document.createElement('canvas');
+// Оптимизация размеров для экономии места в Base64
+const MAX_WIDTH = isCover ? 400 : 700;
+let width = img.width;
+let height = img.height;
+
+if (width > MAX_WIDTH) {
+height *= MAX_WIDTH / width;
+width = MAX_WIDTH;
+}
+
+canvas.width = width;
+canvas.height = height;
+const ctx = canvas.getContext('2d');
+ctx.drawImage(img, 0, 0, width, height);
+
+// Качество 0.65 дает отличный баланс веса и читаемости текста
+resolve(canvas.toDataURL('image/jpeg', 0.65));
+};
+img.onerror = reject;
+img.src = e.target.result;
+};
+reader.onerror = reject;
+reader.readAsDataURL(file);
+});
+};
+
+// --- КОМПОНЕНТЫ ИНТЕРФЕЙСА ---
+
+// Глобальные уведомления (Toast)
+const Toast = ({ msg, type, onClose }) => {
+useEffect(() => {
+const timer = setTimeout(onClose, 3000);
+return () => clearTimeout(timer);
+}, [msg, onClose]);
+
+if (!msg) return null;
+
+return (
+<div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-8 fade-in duration-300">
+<div className={flex items-center gap-3 px-6 py-4 rounded-xl shadow-2xl border ${
+type === 'error' ? 'bg-red-500/10 border-red-500/50 text-red-500' : 'bg-green-500/10 border-green-500/50 text-green-400'
+} backdrop-blur-md`}>
+{type === 'error' ? <X className="w-5 h-5" /> : <CheckCircle2 className="w-5 h-5" />}
+<span className="font-medium">{msg}</span>
+</div>
+</div>
+);
+};
+
+// 1. Каталог (Главная)
+const Catalog = ({ mangas, onSelectManga }) => (
+<div className="p-4 sm:p-6 lg:p-8 animate-in fade-in duration-500">
+<div className="flex items-center justify-between mb-8">
+<h2 className="text-3xl font-black text-white flex items-center gap-3">
+<Library className="text-purple-500 w-8 h-8" />
+Каталог
+</h2>
+<span className="text-gray-400 font-medium bg-gray-800/50 px-4 py-1.5 rounded-full border border-gray-700/50">
+Тайтлов: {mangas.length}
+</span>
+</div>
+
+{mangas.length === 0 ? (
+<div className="flex flex-col items-center justify-center py-32 text-gray-500 border-2 border-dashed border-gray-800 rounded-3xl">
+<ImageIcon className="w-20 h-20 mb-6 opacity-20" />
+<p className="text-lg font-medium">Библиотека пуста</p>
+<p className="text-sm mt-2 opacity-70">Зайдите в панель управления, чтобы добавить мангу.</p>
+</div>
+) : (
+<div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6">
+{mangas.map(manga => (
+<div
+key={manga.id}
+onClick={() => onSelectManga(manga)}
+className="group cursor-pointer bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 shadow-lg hover:shadow-purple-500/20 hover:border-purple-500/50 transition-all duration-300 hover:-translate-y-2 flex flex-col"
+>
+<div className="aspect-[2/3] relative overflow-hidden bg-gray-800">
+{manga.coverData ? (
+<img
+src={manga.coverData}
+alt={manga.title}
+className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 ease-out"
+loading="lazy"
+/>
+) : (
+<div className="w-full h-full flex items-center justify-center"><BookOpen className="text-gray-600 w-12 h-12" /></div>
+)}
+<div className="absolute inset-0 bg-gradient-to-t from-gray-950 via-transparent to-transparent opacity-80" />
+</div>
+<div className="p-4 relative">
+<h3 className="font-bold text-gray-100 group-hover:text-purple-400 transition-colors line-clamp-2 text-sm sm:text-base leading-tight">
+{manga.title}
+</h3>
+</div>
+</div>
+))}
+</div>
+)}
+</div>
+);
+
+// 2. Страница деталей манги
+const MangaDetails = ({ manga, chapters, onSelectChapter, onBack, onDeleteManga, onDeleteChapter }) => {
+const mangaChapters = chapters
+.filter(c => c.mangaId === manga.id)
+.sort((a, b) => Number(b.number) - Number(a.number)); // По убыванию (новые сверху)
+
+return (
+<div className="max-w-5xl mx-auto p-4 sm:p-6 lg:p-8 animate-in slide-in-from-bottom-8 fade-in duration-500">
+<button onClick={onBack} className="group flex items-center text-gray-400 hover:text-white mb-8 transition-colors bg-gray-900/50 px-4 py-2 rounded-full border border-gray-800 hover:border-gray-600 w-fit">
+<ChevronLeft className="w-5 h-5 mr-1 group-hover:-translate-x-1 transition-transform" />
+<span className="font-medium">Назад</span>
+</button>
+
+<div className="flex flex-col md:flex-row gap-8 mb-12 bg-gray-900/40 p-6 sm:p-8 rounded-3xl border border-gray-800/60 shadow-2xl">
+<div className="w-full md:w-64 lg:w-80 shrink-0 mx-auto md:mx-0">
+<img src={manga.coverData} alt={manga.title} className="w-full rounded-2xl shadow-xl shadow-black/50 border border-gray-700/50" />
+</div>
+<div className="text-white flex-1 flex flex-col">
+<div className="flex justify-between items-start gap-4">
+<h1 className="text-3xl sm:text-4xl lg:text-5xl font-black mb-6 leading-tight text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400">
+{manga.title}
+</h1>
+<button onClick={() => onDeleteManga(manga.id)} className="p-3 bg-red-500/10 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-colors border border-red-500/20" title="Удалить мангу">
+<Trash2 className="w-5 h-5" />
+</button>
+</div>
+<div className="bg-gray-800/50 p-6 rounded-2xl border border-gray-700/50 flex-1">
+<h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Описание</h3>
+<p className="text-gray-300 leading-relaxed text-sm sm:text-base">
+{manga.description || "Описание отсутствует. Возможно, автор добавит его позже."}
+</p>
+</div>
+</div>
+</div>
+
+<div className="bg-gray-900 rounded-3xl border border-gray-800 shadow-xl overflow-hidden">
+<div className="p-6 border-b border-gray-800 bg-gray-900/80 flex justify-between items-center">
+<h3 className="text-2xl font-bold text-white flex items-center gap-3">
+Список глав
+<span className="text-sm font-medium bg-purple-500/20 text-purple-400 px-3 py-1 rounded-full">{mangaChapters.length}</span>
+</h3>
+</div>
+
+<div className="flex flex-col divide-y divide-gray-800/50">
+{mangaChapters.length === 0 ? (
+<div className="p-12 text-center text-gray-500">
+<BookOpen className="w-12 h-12 mx-auto mb-4 opacity-30" />
+<p>Главы еще не переведены и не загружены.</p>
+</div>
+) : (
+mangaChapters.map((chapter) => (
+<div key={chapter.id} className="flex items-center justify-between p-4 sm:p-6 hover:bg-gray-800/50 transition-colors group">
+<button
+onClick={() => onSelectChapter(chapter, mangaChapters)}
+className="flex-1 flex flex-col sm:flex-row sm:items-center text-left"
+>
+<span className="text-lg text-white font-bold group-hover:text-purple-400 transition-colors">
+Глава {chapter.number}
+</span>
+{chapter.title && (
+<span className="text-gray-400 sm:ml-4 text-sm mt-1 sm:mt-0 line-clamp-1">
+{chapter.title}
+</span>
+)}
+</button>
+<div className="flex items-center gap-4 ml-4">
+<button onClick={() => onDeleteChapter(chapter.id)} className="text-gray-600 hover:text-red-500 transition-colors p-2" title="Удалить главу">
+<Trash2 className="w-5 h-5" />
+</button>
+<button
+onClick={() => onSelectChapter(chapter, mangaChapters)}
+className="bg-purple-600 hover:bg-purple-500 text-white px-5 py-2 rounded-xl font-medium transition-all shadow-lg shadow-purple-900/20 flex items-center gap-2"
+>
+<span className="hidden sm:inline">Читать</span> <ChevronRight className="w-4 h-4" />
+</button>
+</div>
+</div>
+))
+)}
+</div>
+</div>
+</div>
+);
+};
+
+// 3. Читалка (Оптимизирована для загрузки страниц только текущей главы)
+const Reader = ({ chapter, mangaChapters, onBack, onNavigateChapter }) => {
+const [pages, setPages] = useState([]);
+const [loading, setLoading] = useState(true);
+const [showNav, setShowNav] = useState(true);
+
+// Найти соседние главы
+const currentIndex = mangaChapters.findIndex(c => c.id === chapter.id);
+const nextChapter = currentIndex > 0 ? mangaChapters[currentIndex - 1] : null; // Т.к. отсортировано по убыванию
+const prevChapter = currentIndex < mangaChapters.length - 1 ? mangaChapters[currentIndex + 1] : null;
+
+useEffect(() => {
+setLoading(true);
+// ГЕНИАЛЬНО: Подгружаем только коллекцию страниц ЭТОЙ главы.
+// Это обходит лимиты Firestore и не скачивает лишние мегабайты!
+const chapterPagesRef = collection(db, 'artifacts', appId, 'public', 'data', pages_${chapter.id}`);
+
+const unsub = onSnapshot(chapterPagesRef, (snap) => {
+const fetchedPages = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+// Сортируем страницы по индексу в памяти (Правило 2)
+fetchedPages.sort((a, b) => a.pageIndex - b.pageIndex);
+setPages(fetchedPages);
+setLoading(false);
+}, (error) => {
+console.error("Ошибка загрузки страниц:", error);
+setLoading(false);
+});
+
+return () => unsub();
+}, [chapter.id]);
+
+// Скрытие шапки при прокрутке вниз для погружения
+useEffect(() => {
+let lastScroll = 0;
+const handleScroll = () => {
+const currentScroll = window.pageYOffset;
+if (currentScroll > lastScroll && currentScroll > 100) setShowNav(false);
+else if (currentScroll < lastScroll) setShowNav(true);
+lastScroll = currentScroll;
+};
+window.addEventListener('scroll', handleScroll);
+return () => window.removeEventListener('scroll', handleScroll);
+}, []);
+
+return (
+<div className="min-h-screen bg-[#0a0a0a]">
+{/* Плавающая шапка /}
+<div className={fixed top-0 left-0 right-0 z-50 transition-transform duration-300 ${showNav ? 'translate-y-0' : '-translate-y-full'}}&gt; &lt;div className="bg-gray-950/80 backdrop-blur-xl border-b border-gray-800/50 p-4 flex items-center justify-between shadow-2xl"&gt; &lt;button onClick={onBack} className="flex items-center text-gray-400 hover:text-white transition-colors bg-gray-800/50 px-4 py-2 rounded-xl"&gt; &lt;ChevronLeft className="w-5 h-5 mr-1" /&gt; &lt;span className="hidden sm:inline font-medium"&gt;К оглавлению&lt;/span&gt; &lt;/button&gt; &lt;div className="text-center px-4"&gt; &lt;div className="text-white font-bold text-sm sm:text-base line-clamp-1"&gt;Глава {chapter.number} {chapter.title &&- ${chapter.title}}</div>
+{!loading && <div className="text-gray-500 text-xs mt-0.5">{pages.length} страниц</div>}
+</div>
+<div className="w-24"></div> {/ Spacer for centering */}
+</div>
+</div>
+
+<div className="max-w-[800px] mx-auto flex flex-col items-center pt-24 pb-20 min-h-screen">
+{loading ? (
+<div className="flex flex-col items-center justify-center py-40">
+<Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" />
+<p className="text-gray-400 animate-pulse">Загрузка сканов...</p>
+</div>
+) : pages.length === 0 ? (
+<div className="py-40 text-gray-500 flex flex-col items-center text-center px-4">
+<ImageIcon className="w-16 h-16 mb-4 opacity-20" />
+<p>Страницы для этой главы еще не загружены.</p>
+</div>
+) : (
+<div className="w-full flex flex-col bg-black">
+{pages.map((page, idx) => (
+<img
+key={page.id}
+src={page.imageData}
+alt={Стр. ${idx + 1}`}
+className="w-full h-auto object-contain block m-0 p-0"
+loading="lazy"
+/>
+))}
+</div>
+)}
+
+{/* Навигация между главами внизу */}
+{!loading && pages.length > 0 && (
+<div className="w-full max-w-3xl px-4 py-12 flex flex-col sm:flex-row justify-between items-center gap-4 mt-8 border-t border-gray-800">
+{prevChapter ? (
+<button onClick={() => onNavigateChapter(prevChapter)} className="w-full sm:w-auto px-6 py-4 bg-gray-900 hover:bg-gray-800 text-white rounded-2xl transition-all flex items-center justify-center gap-2 border border-gray-700">
+<ChevronLeft className="w-5 h-5" /> Предыдущая (Гл. {prevChapter.number})
+</button>
+) : <div className="hidden sm:block w-48"></div>}
+
+{nextChapter ? (
+<button onClick={() => onNavigateChapter(nextChapter)} className="w-full sm:w-auto px-6 py-4 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl transition-all shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2">
+Следующая (Гл. {nextChapter.number}) <ChevronRight className="w-5 h-5" />
+</button>
+) : (
+<div className="text-gray-500 italic text-center px-6 py-4">Это последняя вышедшая глава</div>
+)}
+</div>
+)}
+</div>
+</div>
+);
+};
+
+// 4. Панель Администратора
+const AdminPanel = ({ mangas, chapters, notify }) => {
+const [activeTab, setActiveTab] = useState('manga');
+const [loading, setLoading] = useState(false);
+const [uploadProgress, setUploadProgress] = useState(0);
+
+// Форма манги
+const [mangaTitle, setMangaTitle] = useState('');
+const [mangaDesc, setMangaDesc] = useState('');
+const [mangaCover, setMangaCover] = useState(null);
+
+// Форма главы
+const [selectedMangaId, setSelectedMangaId] = useState('');
+const [chapterNumber, setChapterNumber] = useState('');
+const [chapterTitle, setChapterTitle] = useState('');
+
+// Форма страниц
+const [selectedChapId, setSelectedChapId] = useState('');
+const [pageFiles, setPageFiles] = useState([]); // [{file, preview}]
+
+const handleFileSelect = (e) => {
+const files = Array.from(e.target.files);
+const newFiles = files.map(file => ({
+file,
+preview: URL.createObjectURL(file),
+id: Math.random().toString(36).substring(7)
+}));
+setPageFiles(prev => [...prev, ...newFiles]);
+};
+
+const removePageFile = (id) => {
+setPageFiles(prev => prev.filter(p => p.id !== id));
+};
+
+const handleAddManga = async (e) => {
+e.preventDefault();
+if (!mangaCover || !mangaTitle) return notify('Заполните все обязательные поля', 'error');
+setLoading(true);
+try {
+const coverData = await processImage(mangaCover, true);
+const mangasRef = collection(db, 'artifacts', appId, 'public', 'data', 'mangas');
+await addDoc(mangasRef, {
+title: mangaTitle,
+description: mangaDesc,
+coverData,
+createdAt: serverTimestamp()
+});
+setMangaTitle(''); setMangaDesc(''); setMangaCover(null);
+notify('Манга успешно добавлена в каталог!');
+} catch (err) {
+console.error(err);
+notify('Ошибка при добавлении манги', 'error');
+}
+setLoading(false);
+};
+
+const handleAddChapter = async (e) => {
+e.preventDefault();
+if (!selectedMangaId || !chapterNumber) return notify('Заполните все поля', 'error');
+setLoading(true);
+try {
+const chaptersRef = collection(db, 'artifacts', appId, 'public', 'data', 'chapters');
+await addDoc(chaptersRef, {
+mangaId: selectedMangaId,
+number: Number(chapterNumber),
+title: chapterTitle,
+createdAt: serverTimestamp()
+});
+setChapterNumber(''); setChapterTitle('');
+notify('Глава успешно создана!');
+} catch (err) {
+console.error(err);
+notify('Ошибка при создании главы', 'error');
+}
+setLoading(false);
+};
+
+const handleAddPages = async (e) => {
+e.preventDefault();
+if (!selectedChapId || pageFiles.length === 0) return notify('Выберите главу и файлы', 'error');
+setLoading(true);
+setUploadProgress(1);
+try {
+// Сохраняем страницы в отдельную коллекцию для конкретной главы
+const pagesRef = collection(db, 'artifacts', appId, 'public', 'data', pages_${selectedChapId}`);
+
+for (let i = 0; i < pageFiles.length; i++) {
+const item = pageFiles[i];
+const imageData = await processImage(item.file, false);
+await addDoc(pagesRef, {
+pageIndex: i, // Сохраняем порядок
+imageData,
+createdAt: serverTimestamp()
+});
+setUploadProgress(Math.round(((i + 1) / pageFiles.length) * 100));
+}
+
+setPageFiles([]);
+setUploadProgress(0);
+notify(Успешно загружено ${pageFiles.length} страниц!`);
+} catch (err) {
+console.error(err);
+notify('Ошибка при загрузке. Файл слишком большой?', 'error');
+setUploadProgress(0);
+}
+setLoading(false);
+};
+
+const mangaOptions = mangas.map(m => ({ id: m.id, title: m.title }));
+const chapterOptions = chapters
+.filter(c => activeTab === 'pages' && c.mangaId === selectedMangaId)
+.sort((a, b) => a.number - b.number);
+
+return (
+<div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-8 animate-in fade-in duration-500">
+<div className="flex items-center gap-4 mb-8 bg-gray-900/50 p-6 rounded-3xl border border-gray-800">
+<div className="bg-purple-500/20 p-4 rounded-2xl">
+<Settings className="text-purple-400 w-8 h-8" />
+</div>
+<div>
+<h2 className="text-3xl font-black text-white">Панель Управления</h2>
+<p className="text-gray-400 mt-1">Добавление и управление контентом</p>
+</div>
+</div>
+
+<div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2 mb-8 bg-gray-900 p-2 rounded-2xl border border-gray-800">
+{[
+{ id: 'manga', icon: BookOpen, label: '1. Новая Манга' },
+{ id: 'chapter', icon: PlusCircle, label: '2. Новая Глава' },
+{ id: 'pages', icon: Upload, label: '3. Загрузка Страниц' }
+ ].map(tab => (
+<button
+key={tab.id}
+onClick={() => setActiveTab(tab.id)}
+className={flex-1 flex items-center justify-center gap-2 py-4 px-4 rounded-xl font-medium transition-all${
+activeTab === tab.id ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/20' : 'text-gray-400 hover:text-white hover:bg-gray-800'
+}`}
+>
+<tab.icon className="w-5 h-5" /> {tab.label}
+</button>
+))}
+</div>
+
+<div className="bg-gray-900 p-6 sm:p-10 rounded-3xl border border-gray-800 shadow-2xl relative overflow-hidden">
+{/* Индикатор загрузки на фоне */}
+{loading && activeTab === 'pages' && uploadProgress > 0 && (
+<div className="absolute top-0 left-0 h-1 bg-purple-500 transition-all duration-300 z-10" style={{ width: ${uploadProgress}%` }} />
+)}
+
+{activeTab === 'manga' && (
+<form onSubmit={handleAddManga} className="space-y-6">
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Название манги</label>
+<input required type="text" value={mangaTitle} onChange={e => setMangaTitle(e.target.value)}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-gray-600"
+placeholder="Введите название..." />
+</div>
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Описание сюжета</label>
+<textarea value={mangaDesc} onChange={e => setMangaDesc(e.target.value)} rows={5}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all resize-none placeholder:text-gray-600"
+placeholder="О чем эта история?..." />
+</div>
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Обложка (Вертикальная)</label>
+<input required type="file" accept="image/*" onChange={e => setMangaCover(e.target.files[0])}
+className="w-full text-gray-400 file:mr-4 file:py-3 file:px-6 file:rounded-xl file:border-0 file:text-sm file:font-bold file:bg-gray-800 file:text-white hover:file:bg-gray-700 cursor-pointer bg-gray-950 border border-gray-800 rounded-xl p-2" />
+</div>
+<button disabled={loading} type="submit" className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
+{loading ? <Loader2 className="animate-spin w-6 h-6" /> : <PlusCircle className="w-6 h-6" />} Создать Тайтл
+</button>
+</form>
+)}
+
+{activeTab === 'chapter' && (
+<form onSubmit={handleAddChapter} className="space-y-6">
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Выберите Мангу</label>
+<select required value={selectedMangaId} onChange={e => setSelectedMangaId(e.target.value)}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer">
+<option value="">-- Выберите из списка --</option>
+{mangaOptions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
+</select>
+</div>
+<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Номер главы</label>
+<input required type="number" step="0.1" value={chapterNumber} onChange={e => setChapterNumber(e.target.value)}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none placeholder:text-gray-600" placeholder="Например: 1" />
+</div>
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Название главы (Опционально)</label>
+<input type="text" value={chapterTitle} onChange={e => setChapterTitle(e.target.value)}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none placeholder:text-gray-600" placeholder="Рождение легенды" />
+</div>
+</div>
+<button disabled={loading} type="submit" className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
+{loading ? <Loader2 className="animate-spin w-6 h-6" /> : <PlusCircle className="w-6 h-6" />} Создать Главу
+</button>
+</form>
+)}
+
+{activeTab === 'pages' && (
+<form onSubmit={handleAddPages} className="space-y-6">
+<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Манга</label>
+<select required value={selectedMangaId} onChange={e => { setSelectedMangaId(e.target.value); setSelectedChapId(''); }}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer">
+<option value="">-- Выберите --</option>
+{mangaOptions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
+</select>
+</div>
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Глава</label>
+<select required value={selectedChapId} onChange={e => setSelectedChapId(e.target.value)} disabled={!selectedMangaId}
+className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer disabled:opacity-50">
+<option value="">-- Выберите --</option>
+{chapterOptions.map(c => <option key={c.id} value={c.id}>Глава {c.number} {c.title && (${c.title})`}</option>)}
+</select>
+</div>
+</div>
+
+<div>
+<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Страницы (В правильном порядке)</label>
+
+{pageFiles.length === 0 ? (
+<div className="border-2 border-dashed border-gray-700 rounded-2xl p-12 text-center bg-gray-950 hover:border-purple-500 hover:bg-gray-900 transition-all cursor-pointer relative group">
+<input type="file" multiple accept="image/" onChange={handleFileSelect}
+className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+<div className="bg-gray-800 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+<ImageIcon className="w-8 h-8 text-purple-400" />
+</div>
+<p className="text-white font-bold text-lg">Нажмите или перетащите фото сюда</p>
+<p className="text-gray-500 text-sm mt-2">Выделите сразу все сканы главы. Скрипт сам их оптимизирует.</p>
+</div>
+) : (
+<div className="bg-gray-950 p-4 rounded-2xl border border-gray-800">
+<div className="flex justify-between items-center mb-4 pb-4 border-b border-gray-800">
+<span className="text-white font-medium">Выбрано файлов: {pageFiles.length}</span>
+<label className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg cursor-pointer transition-colors text-sm font-medium">
++ Добавить еще
+<input type="file" multiple accept="image/" onChange={handleFileSelect} className="hidden" />
+</label>
+</div>
+<div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
+{pageFiles.map((item, index) => (
+<div key={item.id} className="relative group aspect-[2/3] bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
+<img src={item.preview} alt="Preview" className="w-full h-full object-cover" />
+<div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+<button type="button" onClick={() => removePageFile(item.id)} className="p-2 bg-red-500 rounded-full hover:bg-red-600 text-white shadow-lg transform hover:scale-110 transition-transform">
+<Trash2 className="w-4 h-4" />
+</button>
+</div>
+<div className="absolute top-1 left-1 bg-black/80 text-white text-xs px-2 py-0.5 rounded-md font-bold">{index + 1}</div>
+</div>
+))}
+</div>
+</div>
+)}
+</div>
+
+<button disabled={loading || !selectedChapId || pageFiles.length === 0} type="submit"
+className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
+{loading ? (
+<>
+<Loader2 className="animate-spin w-6 h-6" />
+{uploadProgress > 0 ? Загрузка... ${uploadProgress}%` : 'Обработка...'}
+</>
+) : (
+<><Upload className="w-6 h-6" /> Загрузить на сервер</>
+)}
+</button>
+</form>
+)}
+</div>
+</div>
+);
+};
+
+// --- ГЛАВНЫЙ КОМПОНЕНТ ---
+export default function App() {
+const [user, setUser] = useState(null);
+const [view, setView] = useState('catalog'); // catalog, details, reader, admin
+
+const [mangas, setMangas] = useState([]);
+const [chapters, setChapters] = useState([]);
+
+const [selectedManga, setSelectedManga] = useState(null);
+const [selectedChapter, setSelectedChapter] = useState(null);
+
+// Уведомления
+const [toast, setToast] = useState({ msg: '', type: 'success' });
+const showToast = (msg, type = 'success') => setToast({ msg, type });
+
+// Инициализация
+useEffect(() => {
+const initAuth = async () => {
+try {
+if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+await signInWithCustomToken(auth, __initial_auth_token);
+} else {
+await signInAnonymously(auth);
+}
+} catch (error) {
+console.error("Auth Error:", error);
+}
+};
+initAuth();
+const unsubscribe = onAuthStateChanged(auth, setUser);
+return () => unsubscribe();
+}, []);
+
+// Загрузка Основных Данных (Без страниц!)
+useEffect(() => {
+if (!user) return;
+const dbMangas = collection(db, 'artifacts', appId, 'public', 'data', 'mangas');
+const dbChapters = collection(db, 'artifacts', appId, 'public', 'data', 'chapters');
+
+const unsubMangas = onSnapshot(dbMangas, (snap) => {
+setMangas(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+}, console.error);
+
+const unsubChapters = onSnapshot(dbChapters, (snap) => {
+setChapters(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+}, console.error);
+
+return () => { unsubMangas(); unsubChapters(); };
+}, [user]);
+
+// Функции навигации
+const nav = (v, scroll = true) => { setView(v); if(scroll) window.scrollTo(0,0); };
+const goHome = () => { nav('catalog'); setSelectedManga(null); setSelectedChapter(null); };
+const goToManga = (manga) => { setSelectedManga(manga); nav('details'); };
+const goToReader = (chapter) => { setSelectedChapter(chapter); nav('reader'); };
+
+// Функции удаления
+const handleDeleteManga = async (mangaId) => {
+if (!window.confirm("Удалить эту мангу? Главы и страницы останутся в базе (требуется ручная чистка), но пропадут из каталога.")) return;
+try {
+await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'mangas', mangaId));
+showToast('Манга удалена из каталога', 'success');
+goHome();
+} catch (e) {
+console.error(e);
+showToast('Ошибка при удалении', 'error');
+}
+};
+
+const handleDeleteChapter = async (chapterId) => {
+if (!window.confirm("Удалить эту главу?")) return;
+try {
+await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'chapters', chapterId));
+showToast('Глава удалена', 'success');
+} catch (e) {
+console.error(e);
+showToast('Ошибка при удалении', 'error');
+}
+};
+
+if (!user) {
+return (
+<div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center text-white">
+<div className="relative">
+<div className="absolute inset-0 bg-purple-500 blur-xl opacity-20 rounded-full animate-pulse"></div>
+<Loader2 className="w-16 h-16 text-purple-500 animate-spin relative z-10" />
+</div>
+<h1 className="text-2xl font-black mt-6 tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-white">
+ЗАГРУЗКА
+</h1>
+</div>
+);
+}
+
+return (
+<div className="min-h-screen bg-[#050505] font-sans text-gray-100 selection:bg-purple-500/30 selection:text-white">
+
+{/* Toast Notification */}
+<Toast msg={toast.msg} type={toast.type} onClose={() => setToast({ msg: '', type: 'success' })} />
+
+{/* Навигация (скрыта в читалке) */}
+{view !== 'reader' && (
+<nav className="bg-gray-950/80 backdrop-blur-xl border-b border-gray-900 sticky top-0 z-40">
+<div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+<div className="flex items-center justify-between h-20">
+<div className="flex items-center cursor-pointer group" onClick={goHome}>
+<div className="bg-purple-500/10 p-2 rounded-xl group-hover:bg-purple-500/20 transition-colors mr-3">
+<BookOpen className="text-purple-500 w-8 h-8 transform group-hover:scale-110 transition-transform" />
+</div>
+<span className="text-2xl font-black tracking-tighter text-white">
+Manga<span className="text-purple-500">Pro</span>
+</span>
+</div>
+<div className="flex space-x-2 sm:space-x-4">
+<button
+onClick={goHome}
+className={flex items-center px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl font-bold transition-all${
+view === 'catalog' || view === 'details' ? 'bg-purple-600/10 text-purple-400' : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+}} &gt; &lt;Home className="w-5 h-5 sm:mr-2" /&gt; &lt;span className="hidden sm:inline"&gt;Каталог&lt;/span&gt; &lt;/button&gt; &lt;button onClick={() =&gt; nav('admin')} className={flex items-center px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl font-bold transition-all shadow-lg ${
+view === 'admin' ? 'bg-purple-600 text-white shadow-purple-900/30' : 'bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white shadow-none'
+}`}
+>
+<Upload className="w-5 h-5 sm:mr-2" /> <span className="hidden sm:inline">Добавить</span>
+</button>
+</div>
+</div>
+</div>
+</nav>
+)}
+
+{/* Контент */}
+<main className={view === 'reader' ? '' : 'max-w-7xl mx-auto'}>
+{view === 'catalog' && <Catalog mangas={mangas} onSelectManga={goToManga} />}
+{view === 'details' && selectedManga && (
+<MangaDetails
+manga={selectedManga}
+chapters={chapters}
+onSelectChapter={goToReader}
+onBack={goHome}
+onDeleteManga={handleDeleteManga}
+onDeleteChapter={handleDeleteChapter}
+/>
+)}
+{view === 'reader' && selectedChapter && (
+<Reader
+chapter={selectedChapter}
+mangaChapters={chapters.filter(c => c.mangaId === selectedChapter.mangaId).sort((a,b) => Number(b.number) - Number(a.number))}
+onBack={() => nav('details')}
+onNavigateChapter={goToReader}
+/>
+)}
+{view === 'admin' && <AdminPanel mangas={mangas} chapters={chapters} notify={showToast} />}
+</main>
+
+</div>
+);
+}
