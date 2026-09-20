@@ -1,773 +1,633 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
-import {
-getAuth,
-signInAnonymously,
-signInWithCustomToken,
-onAuthStateChanged
-} from 'firebase/auth';
-import {
-getFirestore,
-collection,
-onSnapshot,
-addDoc,
-deleteDoc,
-doc,
-serverTimestamp
-} from 'firebase/firestore';
-import {
-BookOpen,
-PlusCircle,
-Home,
-Upload,
-ChevronLeft,
-Image as ImageIcon,
-Loader2,
-Trash2,
-Library,
-ChevronRight,
-Settings,
-X,
-CheckCircle2
-} from 'lucide-react';
-
-// --- НАСТРОЙКА FIREBASE ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'manga-app-pro';
-
-// --- УТИЛИТЫ ---
-const processImage = (file, isCover = false) => {
-return new Promise((resolve, reject) => {
-const reader = new FileReader();
-reader.onload = (e) => {
-const img = new Image();
-img.onload = () => {
-const canvas = document.createElement('canvas');
-// Оптимизация размеров для экономии места в Base64
-const MAX_WIDTH = isCover ? 400 : 700;
-let width = img.width;
-let height = img.height;
-
-if (width > MAX_WIDTH) {
-height *= MAX_WIDTH / width;
-width = MAX_WIDTH;
-}
-
-canvas.width = width;
-canvas.height = height;
-const ctx = canvas.getContext('2d');
-ctx.drawImage(img, 0, 0, width, height);
-
-// Качество 0.65 дает отличный баланс веса и читаемости текста
-resolve(canvas.toDataURL('image/jpeg', 0.65));
-};
-img.onerror = reject;
-img.src = e.target.result;
-};
-reader.onerror = reject;
-reader.readAsDataURL(file);
-});
-};
-
-// --- КОМПОНЕНТЫ ИНТЕРФЕЙСА ---
-
-// Глобальные уведомления (Toast)
-const Toast = ({ msg, type, onClose }) => {
-useEffect(() => {
-const timer = setTimeout(onClose, 3000);
-return () => clearTimeout(timer);
-}, [msg, onClose]);
-
-if (!msg) return null;
-
-return (
-<div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-8 fade-in duration-300">
-<div className={flex items-center gap-3 px-6 py-4 rounded-xl shadow-2xl border ${
-type === 'error' ? 'bg-red-500/10 border-red-500/50 text-red-500' : 'bg-green-500/10 border-green-500/50 text-green-400'
-} backdrop-blur-md`}>
-{type === 'error' ? <X className="w-5 h-5" /> : <CheckCircle2 className="w-5 h-5" />}
-<span className="font-medium">{msg}</span>
-</div>
-</div>
-);
-};
-
-// 1. Каталог (Главная)
-const Catalog = ({ mangas, onSelectManga }) => (
-<div className="p-4 sm:p-6 lg:p-8 animate-in fade-in duration-500">
-<div className="flex items-center justify-between mb-8">
-<h2 className="text-3xl font-black text-white flex items-center gap-3">
-<Library className="text-purple-500 w-8 h-8" />
-Каталог
-</h2>
-<span className="text-gray-400 font-medium bg-gray-800/50 px-4 py-1.5 rounded-full border border-gray-700/50">
-Тайтлов: {mangas.length}
-</span>
-</div>
-
-{mangas.length === 0 ? (
-<div className="flex flex-col items-center justify-center py-32 text-gray-500 border-2 border-dashed border-gray-800 rounded-3xl">
-<ImageIcon className="w-20 h-20 mb-6 opacity-20" />
-<p className="text-lg font-medium">Библиотека пуста</p>
-<p className="text-sm mt-2 opacity-70">Зайдите в панель управления, чтобы добавить мангу.</p>
-</div>
-) : (
-<div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6">
-{mangas.map(manga => (
-<div
-key={manga.id}
-onClick={() => onSelectManga(manga)}
-className="group cursor-pointer bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 shadow-lg hover:shadow-purple-500/20 hover:border-purple-500/50 transition-all duration-300 hover:-translate-y-2 flex flex-col"
->
-<div className="aspect-[2/3] relative overflow-hidden bg-gray-800">
-{manga.coverData ? (
-<img
-src={manga.coverData}
-alt={manga.title}
-className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 ease-out"
-loading="lazy"
-/>
-) : (
-<div className="w-full h-full flex items-center justify-center"><BookOpen className="text-gray-600 w-12 h-12" /></div>
-)}
-<div className="absolute inset-0 bg-gradient-to-t from-gray-950 via-transparent to-transparent opacity-80" />
-</div>
-<div className="p-4 relative">
-<h3 className="font-bold text-gray-100 group-hover:text-purple-400 transition-colors line-clamp-2 text-sm sm:text-base leading-tight">
-{manga.title}
-</h3>
-</div>
-</div>
-))}
-</div>
-)}
-</div>
-);
-
-// 2. Страница деталей манги
-const MangaDetails = ({ manga, chapters, onSelectChapter, onBack, onDeleteManga, onDeleteChapter }) => {
-const mangaChapters = chapters
-.filter(c => c.mangaId === manga.id)
-.sort((a, b) => Number(b.number) - Number(a.number)); // По убыванию (новые сверху)
-
-return (
-<div className="max-w-5xl mx-auto p-4 sm:p-6 lg:p-8 animate-in slide-in-from-bottom-8 fade-in duration-500">
-<button onClick={onBack} className="group flex items-center text-gray-400 hover:text-white mb-8 transition-colors bg-gray-900/50 px-4 py-2 rounded-full border border-gray-800 hover:border-gray-600 w-fit">
-<ChevronLeft className="w-5 h-5 mr-1 group-hover:-translate-x-1 transition-transform" />
-<span className="font-medium">Назад</span>
-</button>
-
-<div className="flex flex-col md:flex-row gap-8 mb-12 bg-gray-900/40 p-6 sm:p-8 rounded-3xl border border-gray-800/60 shadow-2xl">
-<div className="w-full md:w-64 lg:w-80 shrink-0 mx-auto md:mx-0">
-<img src={manga.coverData} alt={manga.title} className="w-full rounded-2xl shadow-xl shadow-black/50 border border-gray-700/50" />
-</div>
-<div className="text-white flex-1 flex flex-col">
-<div className="flex justify-between items-start gap-4">
-<h1 className="text-3xl sm:text-4xl lg:text-5xl font-black mb-6 leading-tight text-transparent bg-clip-text bg-gradient-to-br from-white to-gray-400">
-{manga.title}
-</h1>
-<button onClick={() => onDeleteManga(manga.id)} className="p-3 bg-red-500/10 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-colors border border-red-500/20" title="Удалить мангу">
-<Trash2 className="w-5 h-5" />
-</button>
-</div>
-<div className="bg-gray-800/50 p-6 rounded-2xl border border-gray-700/50 flex-1">
-<h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Описание</h3>
-<p className="text-gray-300 leading-relaxed text-sm sm:text-base">
-{manga.description || "Описание отсутствует. Возможно, автор добавит его позже."}
-</p>
-</div>
-</div>
-</div>
-
-<div className="bg-gray-900 rounded-3xl border border-gray-800 shadow-xl overflow-hidden">
-<div className="p-6 border-b border-gray-800 bg-gray-900/80 flex justify-between items-center">
-<h3 className="text-2xl font-bold text-white flex items-center gap-3">
-Список глав
-<span className="text-sm font-medium bg-purple-500/20 text-purple-400 px-3 py-1 rounded-full">{mangaChapters.length}</span>
-</h3>
-</div>
-
-<div className="flex flex-col divide-y divide-gray-800/50">
-{mangaChapters.length === 0 ? (
-<div className="p-12 text-center text-gray-500">
-<BookOpen className="w-12 h-12 mx-auto mb-4 opacity-30" />
-<p>Главы еще не переведены и не загружены.</p>
-</div>
-) : (
-mangaChapters.map((chapter) => (
-<div key={chapter.id} className="flex items-center justify-between p-4 sm:p-6 hover:bg-gray-800/50 transition-colors group">
-<button
-onClick={() => onSelectChapter(chapter, mangaChapters)}
-className="flex-1 flex flex-col sm:flex-row sm:items-center text-left"
->
-<span className="text-lg text-white font-bold group-hover:text-purple-400 transition-colors">
-Глава {chapter.number}
-</span>
-{chapter.title && (
-<span className="text-gray-400 sm:ml-4 text-sm mt-1 sm:mt-0 line-clamp-1">
-{chapter.title}
-</span>
-)}
-</button>
-<div className="flex items-center gap-4 ml-4">
-<button onClick={() => onDeleteChapter(chapter.id)} className="text-gray-600 hover:text-red-500 transition-colors p-2" title="Удалить главу">
-<Trash2 className="w-5 h-5" />
-</button>
-<button
-onClick={() => onSelectChapter(chapter, mangaChapters)}
-className="bg-purple-600 hover:bg-purple-500 text-white px-5 py-2 rounded-xl font-medium transition-all shadow-lg shadow-purple-900/20 flex items-center gap-2"
->
-<span className="hidden sm:inline">Читать</span> <ChevronRight className="w-4 h-4" />
-</button>
-</div>
-</div>
-))
-)}
-</div>
-</div>
-</div>
-);
-};
-
-// 3. Читалка (Оптимизирована для загрузки страниц только текущей главы)
-const Reader = ({ chapter, mangaChapters, onBack, onNavigateChapter }) => {
-const [pages, setPages] = useState([]);
-const [loading, setLoading] = useState(true);
-const [showNav, setShowNav] = useState(true);
-
-// Найти соседние главы
-const currentIndex = mangaChapters.findIndex(c => c.id === chapter.id);
-const nextChapter = currentIndex > 0 ? mangaChapters[currentIndex - 1] : null; // Т.к. отсортировано по убыванию
-const prevChapter = currentIndex < mangaChapters.length - 1 ? mangaChapters[currentIndex + 1] : null;
-
-useEffect(() => {
-setLoading(true);
-// ГЕНИАЛЬНО: Подгружаем только коллекцию страниц ЭТОЙ главы.
-// Это обходит лимиты Firestore и не скачивает лишние мегабайты!
-const chapterPagesRef = collection(db, 'artifacts', appId, 'public', 'data', pages_${chapter.id}`);
-
-const unsub = onSnapshot(chapterPagesRef, (snap) => {
-const fetchedPages = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-// Сортируем страницы по индексу в памяти (Правило 2)
-fetchedPages.sort((a, b) => a.pageIndex - b.pageIndex);
-setPages(fetchedPages);
-setLoading(false);
-}, (error) => {
-console.error("Ошибка загрузки страниц:", error);
-setLoading(false);
-});
-
-return () => unsub();
-}, [chapter.id]);
-
-// Скрытие шапки при прокрутке вниз для погружения
-useEffect(() => {
-let lastScroll = 0;
-const handleScroll = () => {
-const currentScroll = window.pageYOffset;
-if (currentScroll > lastScroll && currentScroll > 100) setShowNav(false);
-else if (currentScroll < lastScroll) setShowNav(true);
-lastScroll = currentScroll;
-};
-window.addEventListener('scroll', handleScroll);
-return () => window.removeEventListener('scroll', handleScroll);
-}, []);
-
-return (
-<div className="min-h-screen bg-[#0a0a0a]">
-{/* Плавающая шапка /}
-<div className={fixed top-0 left-0 right-0 z-50 transition-transform duration-300 ${showNav ? 'translate-y-0' : '-translate-y-full'}}&gt; &lt;div className="bg-gray-950/80 backdrop-blur-xl border-b border-gray-800/50 p-4 flex items-center justify-between shadow-2xl"&gt; &lt;button onClick={onBack} className="flex items-center text-gray-400 hover:text-white transition-colors bg-gray-800/50 px-4 py-2 rounded-xl"&gt; &lt;ChevronLeft className="w-5 h-5 mr-1" /&gt; &lt;span className="hidden sm:inline font-medium"&gt;К оглавлению&lt;/span&gt; &lt;/button&gt; &lt;div className="text-center px-4"&gt; &lt;div className="text-white font-bold text-sm sm:text-base line-clamp-1"&gt;Глава {chapter.number} {chapter.title &&- ${chapter.title}}</div>
-{!loading && <div className="text-gray-500 text-xs mt-0.5">{pages.length} страниц</div>}
-</div>
-<div className="w-24"></div> {/ Spacer for centering */}
-</div>
-</div>
-
-<div className="max-w-[800px] mx-auto flex flex-col items-center pt-24 pb-20 min-h-screen">
-{loading ? (
-<div className="flex flex-col items-center justify-center py-40">
-<Loader2 className="w-12 h-12 text-purple-500 animate-spin mb-4" />
-<p className="text-gray-400 animate-pulse">Загрузка сканов...</p>
-</div>
-) : pages.length === 0 ? (
-<div className="py-40 text-gray-500 flex flex-col items-center text-center px-4">
-<ImageIcon className="w-16 h-16 mb-4 opacity-20" />
-<p>Страницы для этой главы еще не загружены.</p>
-</div>
-) : (
-<div className="w-full flex flex-col bg-black">
-{pages.map((page, idx) => (
-<img
-key={page.id}
-src={page.imageData}
-alt={Стр. ${idx + 1}`}
-className="w-full h-auto object-contain block m-0 p-0"
-loading="lazy"
-/>
-))}
-</div>
-)}
-
-{/* Навигация между главами внизу */}
-{!loading && pages.length > 0 && (
-<div className="w-full max-w-3xl px-4 py-12 flex flex-col sm:flex-row justify-between items-center gap-4 mt-8 border-t border-gray-800">
-{prevChapter ? (
-<button onClick={() => onNavigateChapter(prevChapter)} className="w-full sm:w-auto px-6 py-4 bg-gray-900 hover:bg-gray-800 text-white rounded-2xl transition-all flex items-center justify-center gap-2 border border-gray-700">
-<ChevronLeft className="w-5 h-5" /> Предыдущая (Гл. {prevChapter.number})
-</button>
-) : <div className="hidden sm:block w-48"></div>}
-
-{nextChapter ? (
-<button onClick={() => onNavigateChapter(nextChapter)} className="w-full sm:w-auto px-6 py-4 bg-purple-600 hover:bg-purple-500 text-white rounded-2xl transition-all shadow-lg shadow-purple-900/30 flex items-center justify-center gap-2">
-Следующая (Гл. {nextChapter.number}) <ChevronRight className="w-5 h-5" />
-</button>
-) : (
-<div className="text-gray-500 italic text-center px-6 py-4">Это последняя вышедшая глава</div>
-)}
-</div>
-)}
-</div>
-</div>
-);
-};
-
-// 4. Панель Администратора
-const AdminPanel = ({ mangas, chapters, notify }) => {
-const [activeTab, setActiveTab] = useState('manga');
-const [loading, setLoading] = useState(false);
-const [uploadProgress, setUploadProgress] = useState(0);
-
-// Форма манги
-const [mangaTitle, setMangaTitle] = useState('');
-const [mangaDesc, setMangaDesc] = useState('');
-const [mangaCover, setMangaCover] = useState(null);
-
-// Форма главы
-const [selectedMangaId, setSelectedMangaId] = useState('');
-const [chapterNumber, setChapterNumber] = useState('');
-const [chapterTitle, setChapterTitle] = useState('');
-
-// Форма страниц
-const [selectedChapId, setSelectedChapId] = useState('');
-const [pageFiles, setPageFiles] = useState([]); // [{file, preview}]
-
-const handleFileSelect = (e) => {
-const files = Array.from(e.target.files);
-const newFiles = files.map(file => ({
-file,
-preview: URL.createObjectURL(file),
-id: Math.random().toString(36).substring(7)
-}));
-setPageFiles(prev => [...prev, ...newFiles]);
-};
-
-const removePageFile = (id) => {
-setPageFiles(prev => prev.filter(p => p.id !== id));
-};
-
-const handleAddManga = async (e) => {
-e.preventDefault();
-if (!mangaCover || !mangaTitle) return notify('Заполните все обязательные поля', 'error');
-setLoading(true);
-try {
-const coverData = await processImage(mangaCover, true);
-const mangasRef = collection(db, 'artifacts', appId, 'public', 'data', 'mangas');
-await addDoc(mangasRef, {
-title: mangaTitle,
-description: mangaDesc,
-coverData,
-createdAt: serverTimestamp()
-});
-setMangaTitle(''); setMangaDesc(''); setMangaCover(null);
-notify('Манга успешно добавлена в каталог!');
-} catch (err) {
-console.error(err);
-notify('Ошибка при добавлении манги', 'error');
-}
-setLoading(false);
-};
-
-const handleAddChapter = async (e) => {
-e.preventDefault();
-if (!selectedMangaId || !chapterNumber) return notify('Заполните все поля', 'error');
-setLoading(true);
-try {
-const chaptersRef = collection(db, 'artifacts', appId, 'public', 'data', 'chapters');
-await addDoc(chaptersRef, {
-mangaId: selectedMangaId,
-number: Number(chapterNumber),
-title: chapterTitle,
-createdAt: serverTimestamp()
-});
-setChapterNumber(''); setChapterTitle('');
-notify('Глава успешно создана!');
-} catch (err) {
-console.error(err);
-notify('Ошибка при создании главы', 'error');
-}
-setLoading(false);
-};
-
-const handleAddPages = async (e) => {
-e.preventDefault();
-if (!selectedChapId || pageFiles.length === 0) return notify('Выберите главу и файлы', 'error');
-setLoading(true);
-setUploadProgress(1);
-try {
-// Сохраняем страницы в отдельную коллекцию для конкретной главы
-const pagesRef = collection(db, 'artifacts', appId, 'public', 'data', pages_${selectedChapId}`);
-
-for (let i = 0; i < pageFiles.length; i++) {
-const item = pageFiles[i];
-const imageData = await processImage(item.file, false);
-await addDoc(pagesRef, {
-pageIndex: i, // Сохраняем порядок
-imageData,
-createdAt: serverTimestamp()
-});
-setUploadProgress(Math.round(((i + 1) / pageFiles.length) * 100));
-}
-
-setPageFiles([]);
-setUploadProgress(0);
-notify(Успешно загружено ${pageFiles.length} страниц!`);
-} catch (err) {
-console.error(err);
-notify('Ошибка при загрузке. Файл слишком большой?', 'error');
-setUploadProgress(0);
-}
-setLoading(false);
-};
-
-const mangaOptions = mangas.map(m => ({ id: m.id, title: m.title }));
-const chapterOptions = chapters
-.filter(c => activeTab === 'pages' && c.mangaId === selectedMangaId)
-.sort((a, b) => a.number - b.number);
-
-return (
-<div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-8 animate-in fade-in duration-500">
-<div className="flex items-center gap-4 mb-8 bg-gray-900/50 p-6 rounded-3xl border border-gray-800">
-<div className="bg-purple-500/20 p-4 rounded-2xl">
-<Settings className="text-purple-400 w-8 h-8" />
-</div>
-<div>
-<h2 className="text-3xl font-black text-white">Панель Управления</h2>
-<p className="text-gray-400 mt-1">Добавление и управление контентом</p>
-</div>
-</div>
-
-<div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2 mb-8 bg-gray-900 p-2 rounded-2xl border border-gray-800">
-{[
-{ id: 'manga', icon: BookOpen, label: '1. Новая Манга' },
-{ id: 'chapter', icon: PlusCircle, label: '2. Новая Глава' },
-{ id: 'pages', icon: Upload, label: '3. Загрузка Страниц' }
- ].map(tab => (
-<button
-key={tab.id}
-onClick={() => setActiveTab(tab.id)}
-className={flex-1 flex items-center justify-center gap-2 py-4 px-4 rounded-xl font-medium transition-all${
-activeTab === tab.id ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/20' : 'text-gray-400 hover:text-white hover:bg-gray-800'
-}`}
->
-<tab.icon className="w-5 h-5" /> {tab.label}
-</button>
-))}
-</div>
-
-<div className="bg-gray-900 p-6 sm:p-10 rounded-3xl border border-gray-800 shadow-2xl relative overflow-hidden">
-{/* Индикатор загрузки на фоне */}
-{loading && activeTab === 'pages' && uploadProgress > 0 && (
-<div className="absolute top-0 left-0 h-1 bg-purple-500 transition-all duration-300 z-10" style={{ width: ${uploadProgress}%` }} />
-)}
-
-{activeTab === 'manga' && (
-<form onSubmit={handleAddManga} className="space-y-6">
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Название манги</label>
-<input required type="text" value={mangaTitle} onChange={e => setMangaTitle(e.target.value)}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all placeholder:text-gray-600"
-placeholder="Введите название..." />
-</div>
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Описание сюжета</label>
-<textarea value={mangaDesc} onChange={e => setMangaDesc(e.target.value)} rows={5}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 focus:ring-1 focus:ring-purple-500 outline-none transition-all resize-none placeholder:text-gray-600"
-placeholder="О чем эта история?..." />
-</div>
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Обложка (Вертикальная)</label>
-<input required type="file" accept="image/*" onChange={e => setMangaCover(e.target.files[0])}
-className="w-full text-gray-400 file:mr-4 file:py-3 file:px-6 file:rounded-xl file:border-0 file:text-sm file:font-bold file:bg-gray-800 file:text-white hover:file:bg-gray-700 cursor-pointer bg-gray-950 border border-gray-800 rounded-xl p-2" />
-</div>
-<button disabled={loading} type="submit" className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
-{loading ? <Loader2 className="animate-spin w-6 h-6" /> : <PlusCircle className="w-6 h-6" />} Создать Тайтл
-</button>
-</form>
-)}
-
-{activeTab === 'chapter' && (
-<form onSubmit={handleAddChapter} className="space-y-6">
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Выберите Мангу</label>
-<select required value={selectedMangaId} onChange={e => setSelectedMangaId(e.target.value)}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer">
-<option value="">-- Выберите из списка --</option>
-{mangaOptions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
-</select>
-</div>
-<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Номер главы</label>
-<input required type="number" step="0.1" value={chapterNumber} onChange={e => setChapterNumber(e.target.value)}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none placeholder:text-gray-600" placeholder="Например: 1" />
-</div>
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Название главы (Опционально)</label>
-<input type="text" value={chapterTitle} onChange={e => setChapterTitle(e.target.value)}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none placeholder:text-gray-600" placeholder="Рождение легенды" />
-</div>
-</div>
-<button disabled={loading} type="submit" className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
-{loading ? <Loader2 className="animate-spin w-6 h-6" /> : <PlusCircle className="w-6 h-6" />} Создать Главу
-</button>
-</form>
-)}
-
-{activeTab === 'pages' && (
-<form onSubmit={handleAddPages} className="space-y-6">
-<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Манга</label>
-<select required value={selectedMangaId} onChange={e => { setSelectedMangaId(e.target.value); setSelectedChapId(''); }}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer">
-<option value="">-- Выберите --</option>
-{mangaOptions.map(m => <option key={m.id} value={m.id}>{m.title}</option>)}
-</select>
-</div>
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Глава</label>
-<select required value={selectedChapId} onChange={e => setSelectedChapId(e.target.value)} disabled={!selectedMangaId}
-className="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-4 text-white focus:border-purple-500 outline-none cursor-pointer disabled:opacity-50">
-<option value="">-- Выберите --</option>
-{chapterOptions.map(c => <option key={c.id} value={c.id}>Глава {c.number} {c.title && (${c.title})`}</option>)}
-</select>
-</div>
-</div>
-
-<div>
-<label className="block text-sm font-bold text-gray-300 mb-2 uppercase tracking-wide">Страницы (В правильном порядке)</label>
-
-{pageFiles.length === 0 ? (
-<div className="border-2 border-dashed border-gray-700 rounded-2xl p-12 text-center bg-gray-950 hover:border-purple-500 hover:bg-gray-900 transition-all cursor-pointer relative group">
-<input type="file" multiple accept="image/" onChange={handleFileSelect}
-className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
-<div className="bg-gray-800 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
-<ImageIcon className="w-8 h-8 text-purple-400" />
-</div>
-<p className="text-white font-bold text-lg">Нажмите или перетащите фото сюда</p>
-<p className="text-gray-500 text-sm mt-2">Выделите сразу все сканы главы. Скрипт сам их оптимизирует.</p>
-</div>
-) : (
-<div className="bg-gray-950 p-4 rounded-2xl border border-gray-800">
-<div className="flex justify-between items-center mb-4 pb-4 border-b border-gray-800">
-<span className="text-white font-medium">Выбрано файлов: {pageFiles.length}</span>
-<label className="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg cursor-pointer transition-colors text-sm font-medium">
-+ Добавить еще
-<input type="file" multiple accept="image/" onChange={handleFileSelect} className="hidden" />
-</label>
-</div>
-<div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
-{pageFiles.map((item, index) => (
-<div key={item.id} className="relative group aspect-[2/3] bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
-<img src={item.preview} alt="Preview" className="w-full h-full object-cover" />
-<div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-<button type="button" onClick={() => removePageFile(item.id)} className="p-2 bg-red-500 rounded-full hover:bg-red-600 text-white shadow-lg transform hover:scale-110 transition-transform">
-<Trash2 className="w-4 h-4" />
-</button>
-</div>
-<div className="absolute top-1 left-1 bg-black/80 text-white text-xs px-2 py-0.5 rounded-md font-bold">{index + 1}</div>
-</div>
-))}
-</div>
-</div>
-)}
-</div>
-
-<button disabled={loading || !selectedChapId || pageFiles.length === 0} type="submit"
-className="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-4 rounded-xl flex justify-center items-center gap-2 transition-all disabled:opacity-50 mt-4 shadow-lg shadow-purple-900/20">
-{loading ? (
-<>
-<Loader2 className="animate-spin w-6 h-6" />
-{uploadProgress > 0 ? Загрузка... ${uploadProgress}%` : 'Обработка...'}
-</>
-) : (
-<><Upload className="w-6 h-6" /> Загрузить на сервер</>
-)}
-</button>
-</form>
-)}
-</div>
-</div>
-);
-};
-
-// --- ГЛАВНЫЙ КОМПОНЕНТ ---
-export default function App() {
-const [user, setUser] = useState(null);
-const [view, setView] = useState('catalog'); // catalog, details, reader, admin
-
-const [mangas, setMangas] = useState([]);
-const [chapters, setChapters] = useState([]);
-
-const [selectedManga, setSelectedManga] = useState(null);
-const [selectedChapter, setSelectedChapter] = useState(null);
-
-// Уведомления
-const [toast, setToast] = useState({ msg: '', type: 'success' });
-const showToast = (msg, type = 'success') => setToast({ msg, type });
-
-// Инициализация
-useEffect(() => {
-const initAuth = async () => {
-try {
-if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-await signInWithCustomToken(auth, __initial_auth_token);
-} else {
-await signInAnonymously(auth);
-}
-} catch (error) {
-console.error("Auth Error:", error);
-}
-};
-initAuth();
-const unsubscribe = onAuthStateChanged(auth, setUser);
-return () => unsubscribe();
-}, []);
-
-// Загрузка Основных Данных (Без страниц!)
-useEffect(() => {
-if (!user) return;
-const dbMangas = collection(db, 'artifacts', appId, 'public', 'data', 'mangas');
-const dbChapters = collection(db, 'artifacts', appId, 'public', 'data', 'chapters');
-
-const unsubMangas = onSnapshot(dbMangas, (snap) => {
-setMangas(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-}, console.error);
-
-const unsubChapters = onSnapshot(dbChapters, (snap) => {
-setChapters(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-}, console.error);
-
-return () => { unsubMangas(); unsubChapters(); };
-}, [user]);
-
-// Функции навигации
-const nav = (v, scroll = true) => { setView(v); if(scroll) window.scrollTo(0,0); };
-const goHome = () => { nav('catalog'); setSelectedManga(null); setSelectedChapter(null); };
-const goToManga = (manga) => { setSelectedManga(manga); nav('details'); };
-const goToReader = (chapter) => { setSelectedChapter(chapter); nav('reader'); };
-
-// Функции удаления
-const handleDeleteManga = async (mangaId) => {
-if (!window.confirm("Удалить эту мангу? Главы и страницы останутся в базе (требуется ручная чистка), но пропадут из каталога.")) return;
-try {
-await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'mangas', mangaId));
-showToast('Манга удалена из каталога', 'success');
-goHome();
-} catch (e) {
-console.error(e);
-showToast('Ошибка при удалении', 'error');
-}
-};
-
-const handleDeleteChapter = async (chapterId) => {
-if (!window.confirm("Удалить эту главу?")) return;
-try {
-await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'chapters', chapterId));
-showToast('Глава удалена', 'success');
-} catch (e) {
-console.error(e);
-showToast('Ошибка при удалении', 'error');
-}
-};
-
-if (!user) {
-return (
-<div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center text-white">
-<div className="relative">
-<div className="absolute inset-0 bg-purple-500 blur-xl opacity-20 rounded-full animate-pulse"></div>
-<Loader2 className="w-16 h-16 text-purple-500 animate-spin relative z-10" />
-</div>
-<h1 className="text-2xl font-black mt-6 tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-white">
-ЗАГРУЗКА
-</h1>
-</div>
-);
-}
-
-return (
-<div className="min-h-screen bg-[#050505] font-sans text-gray-100 selection:bg-purple-500/30 selection:text-white">
-
-{/* Toast Notification */}
-<Toast msg={toast.msg} type={toast.type} onClose={() => setToast({ msg: '', type: 'success' })} />
-
-{/* Навигация (скрыта в читалке) */}
-{view !== 'reader' && (
-<nav className="bg-gray-950/80 backdrop-blur-xl border-b border-gray-900 sticky top-0 z-40">
-<div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-<div className="flex items-center justify-between h-20">
-<div className="flex items-center cursor-pointer group" onClick={goHome}>
-<div className="bg-purple-500/10 p-2 rounded-xl group-hover:bg-purple-500/20 transition-colors mr-3">
-<BookOpen className="text-purple-500 w-8 h-8 transform group-hover:scale-110 transition-transform" />
-</div>
-<span className="text-2xl font-black tracking-tighter text-white">
-Manga<span className="text-purple-500">Pro</span>
-</span>
-</div>
-<div className="flex space-x-2 sm:space-x-4">
-<button
-onClick={goHome}
-className={flex items-center px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl font-bold transition-all${
-view === 'catalog' || view === 'details' ? 'bg-purple-600/10 text-purple-400' : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-}} &gt; &lt;Home className="w-5 h-5 sm:mr-2" /&gt; &lt;span className="hidden sm:inline"&gt;Каталог&lt;/span&gt; &lt;/button&gt; &lt;button onClick={() =&gt; nav('admin')} className={flex items-center px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl font-bold transition-all shadow-lg ${
-view === 'admin' ? 'bg-purple-600 text-white shadow-purple-900/30' : 'bg-gray-800 text-gray-300 hover:bg-gray-700 hover:text-white shadow-none'
-}`}
->
-<Upload className="w-5 h-5 sm:mr-2" /> <span className="hidden sm:inline">Добавить</span>
-</button>
-</div>
-</div>
-</div>
-</nav>
-)}
-
-{/* Контент */}
-<main className={view === 'reader' ? '' : 'max-w-7xl mx-auto'}>
-{view === 'catalog' && <Catalog mangas={mangas} onSelectManga={goToManga} />}
-{view === 'details' && selectedManga && (
-<MangaDetails
-manga={selectedManga}
-chapters={chapters}
-onSelectChapter={goToReader}
-onBack={goHome}
-onDeleteManga={handleDeleteManga}
-onDeleteChapter={handleDeleteChapter}
-/>
-)}
-{view === 'reader' && selectedChapter && (
-<Reader
-chapter={selectedChapter}
-mangaChapters={chapters.filter(c => c.mangaId === selectedChapter.mangaId).sort((a,b) => Number(b.number) - Number(a.number))}
-onBack={() => nav('details')}
-onNavigateChapter={goToReader}
-/>
-)}
-{view === 'admin' && <AdminPanel mangas={mangas} chapters={chapters} notify={showToast} />}
-</main>
-
-</div>
-);
-}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ENT Pro Elite | Подготовка к ЕНТ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        .fade-in { animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .pop-in { animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        @keyframes popIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+        .shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+        @keyframes shake {
+            10%, 90% { transform: translate3d(-1px, 0, 0); } 20%, 80% { transform: translate3d(2px, 0, 0); }
+            30%, 50%, 70% { transform: translate3d(-4px, 0, 0); } 40%, 60% { transform: translate3d(4px, 0, 0); }
+        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .glass-dark { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .option-radio { transition: all 0.2s ease; }
+        .bg-glow { position: fixed; top: -20%; left: -10%; width: 50vw; height: 50vw; background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, rgba(15,23,42,0) 70%); z-index: -1; pointer-events: none; }
+    </style>
+</head>
+<body class="h-screen flex overflow-hidden selection:bg-indigo-500/30 selection:text-indigo-200">
+    <div class="bg-glow"></div>
+
+    <!-- Desktop Sidebar -->
+    <aside class="hidden md:flex w-64 flex-col bg-slate-900 border-r border-slate-800 z-20">
+        <div class="h-20 flex items-center px-6 border-b border-slate-800">
+            <div class="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center mr-3 shadow-lg shadow-indigo-500/20">
+                <i data-lucide="zap" class="text-white w-5 h-5"></i>
+            </div>
+            <span class="text-xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">ENT Elite</span>
+        </div>
+        
+        <nav class="flex-1 py-6 px-4 space-y-2">
+            <button onclick="navigate('dashboard')" id="nav-dashboard" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all text-slate-400 hover:bg-slate-800 hover:text-white">
+                <i data-lucide="layout-grid" class="w-5 h-5"></i> Тренировка
+            </button>
+            <button onclick="navigate('history')" id="nav-history" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all text-slate-400 hover:bg-slate-800 hover:text-white">
+                <i data-lucide="bar-chart-3" class="w-5 h-5"></i> Статистика и База
+            </button>
+        </nav>
+        
+        <div class="p-6 border-t border-slate-800">
+            <div class="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4 text-center">
+                <i data-lucide="database" class="w-6 h-6 text-emerald-400 mx-auto mb-2"></i>
+                <p class="text-xs text-slate-400 font-medium"><span id="db-count" class="text-emerald-400 font-bold">80</span> вопросов · Облако подключено</p>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 relative flex flex-col h-full bg-slate-900/50">
+        <!-- Mobile Header -->
+        <header class="md:hidden h-16 glass-dark border-b border-slate-800 flex items-center justify-center px-4 z-20 sticky top-0">
+            <div class="flex items-center gap-2">
+                <i data-lucide="zap" class="text-indigo-500 w-5 h-5"></i>
+                <span class="font-extrabold text-lg tracking-wide text-white">ENT Elite</span>
+            </div>
+        </header>
+
+        <!-- Dynamic Content Container -->
+        <div id="app-content" class="flex-1 overflow-y-auto p-4 md:p-8 pb-24 md:pb-8 relative scroll-smooth">
+            <div id="loader" class="absolute inset-0 bg-slate-900 z-50 flex flex-col items-center justify-center">
+                <div class="w-12 h-12 border-4 border-slate-700 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
+                <p class="text-sm font-medium text-slate-400 tracking-widest uppercase">Подключение к базе данных...</p>
+            </div>
+        </div>
+
+        <!-- Mobile Bottom Nav -->
+        <nav class="md:hidden absolute bottom-0 left-0 w-full glass-dark border-t border-slate-800 flex justify-around p-2 z-30 pb-safe">
+            <button onclick="navigate('dashboard')" id="nav-mob-dashboard" class="nav-mob-btn flex flex-col items-center gap-1.5 p-2 text-slate-500 hover:text-indigo-400 transition-colors w-20">
+                <i data-lucide="layout-grid" class="w-5 h-5"></i>
+                <span class="text-[10px] font-bold">Тесты</span>
+            </button>
+            <button onclick="navigate('history')" id="nav-mob-history" class="nav-mob-btn flex flex-col items-center gap-1.5 p-2 text-slate-500 hover:text-indigo-400 transition-colors w-20">
+                <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
+                <span class="text-[10px] font-bold">Успехи</span>
+            </button>
+        </nav>
+    </main>
+
+    <!-- Modal for Mistakes Review -->
+    <div id="review-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 hidden items-center justify-center opacity-0 transition-opacity p-4">
+        <div class="bg-slate-800 border border-slate-700 rounded-3xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col transform scale-95 transition-transform" id="review-modal-content">
+            <div class="p-6 border-b border-slate-700 flex items-center justify-between">
+                <h3 class="text-xl font-bold text-white flex items-center gap-2">
+                    <i data-lucide="file-text" class="w-5 h-5 text-indigo-400"></i> Разбор ошибок теста
+                </h3>
+                <button onclick="closeReviewModal()" class="text-slate-400 hover:text-white p-2 rounded-xl bg-slate-700/50 hover:bg-slate-700 transition-colors">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div class="p-6 overflow-y-auto space-y-4 flex-1" id="review-modal-body">
+                <!-- Заполняется динамически -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Exit Modal -->
+    <div id="exit-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 hidden items-center justify-center opacity-0 transition-opacity">
+        <div class="bg-slate-800 border border-slate-700 p-6 rounded-3xl shadow-2xl max-w-sm w-full mx-4 transform scale-95 transition-transform" id="exit-modal-content">
+            <div class="w-12 h-12 bg-rose-500/20 text-rose-500 rounded-full flex items-center justify-center mb-4"><i data-lucide="alert-triangle" class="w-6 h-6"></i></div>
+            <h3 class="text-xl font-bold text-white mb-2">Прервать тест?</h3>
+            <p class="text-sm text-slate-400 mb-6 leading-relaxed">Твой прогресс в этом тесте сгорит. Точно хочешь выйти?</p>
+            <div class="flex gap-3">
+                <button onclick="closeExitModal()" class="flex-1 px-4 py-3 text-sm font-bold text-slate-300 bg-slate-700 hover:bg-slate-600 rounded-xl transition-colors">Остаться</button>
+                <button onclick="confirmExitTest()" class="flex-1 px-4 py-3 text-sm font-bold text-white bg-rose-600 hover:bg-rose-500 rounded-xl transition-colors">Выйти</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { projectId: "demo-project" };
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ent-pro-elite';
+        let app, auth, db, user, useLocalFallback = false;
+
+        try { app = initializeApp(firebaseConfig); auth = getAuth(app); db = getFirestore(app); } 
+        catch (e) { useLocalFallback = true; }
+
+        /* --- БАЗА ВОПРОСОВ (80 ШТУК) --- */
+        const questionBank = [
+            { q: "Способ заострения края однослойного каменного орудия путем создания мелких выемок (подобно зубьям пилы):", options: ["Ретушь", "Рубка", "Пиление", "Теска"], correct: 0, explanation: "Ретушь — техника обработки камня в каменном веке для создания острого лезвия." },
+            { q: "Хан, чье правление оставило след в истории казахов, башкир, ногайцев, и установивший дипломатические отношения с Иваном Грозным:", options: ["Хакназар", "Касым", "Тауекел", "Шыгай"], correct: 0, explanation: "Хакназар хан (1538–1580) объединил племена и наладил связи с Москвой (Иваном IV)." },
+            { q: "В 20-х годах XVIII века Джунгария, заключившая мирное соглашение с империей Цин, направила все свои силы на:", options: ["Нападение на казахские земли", "Покорение Тибета", "Завоевание Сибири", "Покорение Монголии"], correct: 0, explanation: "После перемирия с Китаем в 1722 г., джунгары бросили войска на казахов, начав «Годы Великого бедствия»." },
+            { q: "В записях М.Х. Дулати причина казни эмиров и беков Тоглук Тимуром:", options: ["За то, что они не приняли ислам", "За оставление рядов армии", "За прекращение войны", "За выступление против власти"], correct: 0, explanation: "Тоглук Тимур сделал ислам государственной религией в Могулистане и жестоко карал отступников." },
+            { q: "С 1949 года на превращение Казахстана в зону экологического бедствия повлияло:", options: ["Открытие Семипалатинского полигона", "Освоение целинных земель", "Открытие полиметаллического предприятия", "Завод по производству гербицидов"], correct: 0, explanation: "29 августа 1949 г. на Семипалатинском ядерном полигоне прошло первое испытание бомбы." },
+            { q: "Крепость, построенная в Жетысу в 40-х годах XIX века:", options: ["Капал", "Семей", "Оскемен", "Акмола"], correct: 0, explanation: "Укрепление Капал было заложено в 1847 году в Семиречье." },
+            { q: "Согласно Декрету о «Натуральном мясном налоге» (1921 г.), от налога освобождались:", options: ["Кочевые казахские крестьяне", "Оседлые русские крестьяне", "Ремесленники и торговцы", "Оседлые казахские крестьяне"], correct: 0, explanation: "Кочевники были освобождены от налога из-за катастрофических последствий джута и разрухи." },
+            { q: "Труд Абу Райхана аль-Бируни:", options: ["Памятники минувших поколений", "Тарих-и Рашиди", "Книга путей и государств", "Диуани Хикмет"], correct: 0, explanation: "«Памятники минувших поколений» — знаменитый хронологический труд Аль-Бируни." },
+            { q: "Главная причина восстания под предводительством Кенесары Касымова:", options: ["Колониальный гнет", "Увеличение налогов султанами", "Создание генерал-губернаторств", "Гнет Сибирского ханства"], correct: 0, explanation: "Целью Кенесары было остановить колониальную экспансию России и сохранить независимость." },
+            { q: "Города, где после Февральской революции 1917 года были созданы молодежные организации:", options: ["Петропавловск, Акмола", "Оскемен, Караганда", "Костанай, Жезказган", "Жанаозен, Орал"], correct: 0, explanation: "«Жас азамат» в Петропавловске и «Жас казак» в Акмолинске были созданы в 1917 г." },
+            { q: "Выдающийся педагог-просветитель, открывший путь к светскому образованию казахского народа:", options: ["И. Алтынсарин", "А. Кунанбаев", "М. Шокай", "А. Байтурсынов"], correct: 0, explanation: "Ибрай Алтынсарин открывал первые школы и создал «Казахскую хрестоматию»." },
+            { q: "Годы, когда в Казахстане начали открываться «русско-казахские школы»:", options: ["70-е годы XIX в.", "40-е годы XIX в.", "60-е годы XIX в.", "70-е годы XVIII в."], correct: 0, explanation: "После реформ 1867-68 гг. началось массовое открытие школ для подготовки толмачей и писарей (1870-е)." },
+            { q: "В каком веке произошло событие, описанное в тексте про царицу Томирис?", options: ["VI в. до н.э.", "V в. до н.э.", "IV в. до н.э.", "VII в. до н.э."], correct: 0, explanation: "Битва Томирис с Киром Великим произошла в 530 году до н.э. (VI век до н.э.)." },
+            { q: "Определите, что НЕ характерно для племени саков:", options: ["Переход от патриархата к матриархату", "Широкое распространение кочевого образа жизни", "Уважительное отношение к женщинам", "Наследование власти женщинами"], correct: 0, explanation: "Общество саков было строго патриархальным, несмотря на права женщин." },
+            { q: "Что НЕ было характерно для войск, победивших захватчиков (в эпоху Томирис):", options: ["Распространение пехоты", "Отличная стрельба из лука", "Использование тяжелой кавалерии", "Применение тактики засад"], correct: 0, explanation: "Саки сражались на конях. Пешие войска были не характерны для кочевников." },
+            { q: "Чем закончилась битва между войском царицы Томирис и войском персидского царя Кира?", options: ["Войско Кира потерпело поражение, сам царь погиб", "Персы победили", "Заключен мирный договор", "Кир захватил в плен Томирис"], correct: 0, explanation: "Массагеты победили, а Томирис приказала окунуть голову убитого Кира в мешок с кровью." },
+            { q: "Древнее название реки Сырдарьи:", options: ["Яксарт", "Итил", "Талас", "Джейхун"], correct: 0, explanation: "В древних источниках Сырдарья упоминается как Яксарт." },
+            { q: "Настоящее имя Абылай хана:", options: ["Абильмансур", "Сабалак", "Темучин", "Уали"], correct: 0, explanation: "Настоящее имя Абылая — Абильмансур. «Сабалак» — это его прозвище в юности." },
+            { q: "Столица усуней:", options: ["Чигучен (Город Красной долины)", "Суяб", "Янгикент", "Битянь"], correct: 0, explanation: "Столица усуней называлась Чигу (или Чигучен) у озера Иссык-Куль." },
+            { q: "Свод законов «Жеті жарғы» был принят при хане:", options: ["Тауке", "Касыме", "Есиме", "Хакназаре"], correct: 0, explanation: "Свод обычного права «Жеті жарғы» был утвержден при Тауке хане с участием биев." },
+            { q: "Свод законов «Қасқа жолы» принадлежит хану:", options: ["Касыму", "Есиму", "Тауке", "Абылаю"], correct: 0, explanation: "При хане Касыме в XVI веке был создан первый свод законов — «Қасқа жолы»." },
+            { q: "Где был найден «Золотой человек» в 1969 году?", options: ["В Иссыкском кургане", "В Берельских курганах", "В кургане Шиликты", "В Бесшатырском кургане"], correct: 0, explanation: "Останки сакского воина были найдены К. Акишевым в кургане Иссык." },
+            { q: "Какая стоянка эпохи энеолита свидетельствует о первом одомашнивании лошади?", options: ["Ботай", "Пеньки", "Карабас", "Шекты"], correct: 0, explanation: "Поселение Ботай (Северный Казахстан) — памятник, где впервые в мире приручили лошадь." },
+            { q: "Битва, остановившая продвижение китайцев в 751 году:", options: ["Атлахская (Таласская) битва", "Каталаунская битва", "Битва при Орбулаке", "Битва на реке Калка"], correct: 0, explanation: "В 751 году арабы с карлуками разбили китайцев в Таласской битве." },
+            { q: "Основатели Казахского ханства:", options: ["Керей и Жанибек", "Касым и Бурундук", "Есим и Турсун", "Абулхаир и Барак"], correct: 0, explanation: "В 1465 году султаны Керей и Жанибек основали Казахское ханство." },
+            { q: "Название первой столицы Казахской АССР (1920-1925 гг.):", options: ["Оренбург", "Кзыл-Орда", "Алма-Ата", "Верный"], correct: 0, explanation: "Первой столицей КазАССР был Оренбург." },
+            { q: "Лидеры восстания 1836-1838 годов в Букеевской орде:", options: ["Исатай Тайманов и Махамбет Утемисов", "Сырым Датов", "Жанкожа Нурмухамедов", "Кенесары Касымов"], correct: 0, explanation: "Восстание шаруа во Внутренней орде возглавили Исатай и Махамбет." },
+            { q: "Кто был первым секретарем ЦК Компартии Казахстана до Декабрьских событий 1986 года?", options: ["Динмухамед Кунаев", "Жумабай Шаяхметов", "Геннадий Колбин", "Нурсултан Назарбаев"], correct: 0, explanation: "Снятие Д.А. Кунаева и назначение Г. Колбина привело к декабрьским событиям." },
+            { q: "В каком году была введена национальная валюта РК — тенге?", options: ["1993", "1991", "1995", "1992"], correct: 0, explanation: "Тенге был введен 15 ноября 1993 года." },
+            { q: "Автор произведения «Диуани лугат ат-тюрк»:", options: ["Махмуд Кашгари", "Юсуф Баласагуни", "Ахмед Яссауи", "Аль-Фараби"], correct: 0, explanation: "Махмуд Кашгари написал этот фундаментальный словарь в XI веке." },
+            { q: "Основатель Золотой Орды:", options: ["Бату (Батый)", "Чингисхан", "Джучи", "Берке"], correct: 0, explanation: "Золотую Орду основал Бату хан." },
+            { q: "Как назывался сборщик налогов в Золотой Орде?", options: ["Баскак", "Даруга", "Тархан", "Беклербек"], correct: 0, explanation: "Баскаки — представители хана для сбора дани." },
+            { q: "Год принятия действующей Конституции Республики Казахстан:", options: ["1995", "1993", "1991", "1998"], correct: 0, explanation: "Конституция принята на референдуме 30 августа 1995 года." },
+            { q: "Какое событие произошло 16 декабря 1991 года?", options: ["Принятие закона о независимости РК", "Закрытие Семипалатинского полигона", "Введение тенге", "Принятие Конституции"], correct: 0, explanation: "16 декабря 1991 г. принят закон о государственной независимости." },
+            { q: "Кто является автором кюя «Сарыарка» и «Адай»?", options: ["Курмангазы Сагырбаев", "Даулеткерей", "Таттимбет", "Ыкылас"], correct: 0, explanation: "Курмангазы — классик казахской инструментальной музыки." },
+            { q: "Курултай казахов в Каракумах состоялся в:", options: ["1710 г.", "1723 г.", "1729 г.", "1718 г."], correct: 0, explanation: "В 1710 году в Каракумах создан единый кулак против джунгар." },
+            { q: "Победоносная битва казахов с джунгарами в 1729 (1730) году:", options: ["Аныракайская битва", "Булантинская битва", "Орбулакская битва", "Узунагашская битва"], correct: 0, explanation: "Аныракайская битва стала переломной в войне с джунгарами." },
+            { q: "Какой хан Младшего жуза первым принял подданство России в 1731 году?", options: ["Абулхаир", "Абилмамбет", "Нуралы", "Семеке"], correct: 0, explanation: "Хан Абулхаир принял подданство в 1731 году ради защиты от джунгар." },
+            { q: "Кого казахи прозвали «Аз-Тауке»?", options: ["Тауке хана", "Есим хана", "Касым хана", "Абылай хана"], correct: 0, explanation: "Мудрым (Аз-Тауке) его прозвали за ум и создание «Жеті жарғы»." },
+            { q: "Столица Казахского ханства при хане Есиме:", options: ["Туркестан", "Сыганак", "Тараз", "Сауран"], correct: 0, explanation: "Есим хан перенес столицу в Туркестан." },
+            { q: "Трактат «Взгляды жителей добродетельного города» написал:", options: ["Аль-Фараби", "Ибн Сина", "Аль-Бируни", "Юсуф Баласагуни"], correct: 0, explanation: "Аль-Фараби — уроженец Отырара, великий философ." },
+            { q: "Эпоха неолита характеризуется:", options: ["Появлением производящего хозяйства", "Открытием меди", "Использованием железа", "Одомашниванием лошади"], correct: 0, explanation: "Переход к производящему хозяйству (земледелие и скотоводство)." },
+            { q: "Стиль, характерный для искусства саков:", options: ["Звериный стиль", "Геометрический орнамент", "Полихромный стиль", "Античный стиль"], correct: 0, explanation: "Скифо-сибирский «звериный стиль»." },
+            { q: "Правитель гуннов, создавший огромную империю в Европе:", options: ["Аттила", "Моде (Мете)", "Чжи-чжи", "Баламбер"], correct: 0, explanation: "Аттила объединил племена варваров в V веке." },
+            { q: "Тюркский каганат разделился в:", options: ["603 году", "552 году", "704 году", "756 году"], correct: 0, explanation: "Распад каганата на Западный и Восточный произошел в 603 году." },
+            { q: "Титул правителя у огузов:", options: ["Джабгу", "Каган", "Гурхан", "Идикут"], correct: 0, explanation: "Верховный правитель огузов носил титул джабгу." },
+            { q: "Город, разрушенный монголами после 6-месячной осады в 1219-1220 гг.:", options: ["Отырар", "Сыганак", "Тараз", "Баласагун"], correct: 0, explanation: "Героическая оборона Отырара длилась 6 месяцев." },
+            { q: "Государство в XIV веке на территории Восточного Дашт-и Кыпчака:", options: ["Ак Орда", "Ногайская Орда", "Могулистан", "Сибирское ханство"], correct: 0, explanation: "Ак Орда стала первым крупным государством после распада Орды." },
+            { q: "Восстание 1916 года в Казахстане ночило характер:", options: ["Национально-освободительный", "Религиозный", "Династический", "Сепаратистский"], correct: 0, explanation: "Восстание 1916 года было направлено против царизма и реквизиции инородцев." },
+            { q: "Лидер партии «Алаш»:", options: ["Алихан Букейханов", "Ахмет Байтурсынов", "Миржакип Дулатов", "Мустафа Шокай"], correct: 0, explanation: "Алихан Букейханов возглавил национально-освободительное движение «Алаш»." },
+            { q: "Культура бронзового века, ставшая оседло-земледельческой и городской на территории Мургабского оазиса:", options: ["Шам", "Хорезм", "Фергана", "Маргуш"], correct: 3, explanation: "Маргуш (Маргиана) — древняя цивилизация бронзового века в бассейне реки Мургаб, отличавшаяся оседло-земледельческой и городской культурой." },
+            { q: "Определите союзник огузов в борьбе с Хазарским каганатом:", options: ["Волжская Булгария", "Киевская Русь", "Кимакский каганат", "Караханидское государство"], correct: 1, explanation: "В 965 году между огузским джабгу и киевским князем Святославом был заключен военный союз, направленный против Хазарского каганата." },
+            { q: "Крепость, возведенная в 1761 году:", options: ["Бухтарминская", "Петропавловская", "Усть-Каменогорская", "Семипалатинская"], correct: 0, explanation: "В 1761 году на Алтае была заложена Бухтарминская крепость, вошедшая в состав Иртышской линии." },
+            { q: "Народы, в истории которых правление Хакназар хана оставило значительный след:", options: ["Таджики, ногайцы", "Калмыки, узбеки", "Башкиры, ногайцы", "Кыргызы, уйгуры"], correct: 2, explanation: "Хакназар хан (1538–1580 гг.) успешно воевал с Ногайской Ордой и присоединил часть башкирских и ногайских племен к Казахскому ханству." },
+            { q: "А. Жубанов — основоположник...", options: ["Уйгурского драматического театра", "Театра оперы и балета", "Государственного музея искусств", "Казахского музыкального театра"], correct: 3, explanation: "Ахмет Жубанов стоял у истоков профессионального казахского музыкального искусства и был одним из создателей Казахского музыкального театра." },
+            { q: "В 70-х годах XVIII века Абылай хан нанес удар в ряде войн и принудил платить налоги город:", options: ["Ташкент", "Бухара", "Самарканд", "Хива"], correct: 0, explanation: "В результате успешных походов в 1770-х годах Абылай хан заставил правителей Ташкента платить дань Казахскому ханству." },
+            { q: "Причина голода 1921-1922 гг.:", options: ["Промышленная индустриализация", "Политика «военного коммунизма»", "Первая мировая война", "Насильственная коллективизация"], correct: 1, explanation: "Политика продразверстки (часть «военного коммунизма») и сильная засуха привели к катастрофическому голоду в 1921-1922 годах." },
+            { q: "По социальной лестнице традиционного казахского общества право занимать должность султана принадлежало:", options: ["Сунакам", "Торе", "Толенгитам", "Ходжам"], correct: 1, explanation: "В казахском обществе сословие торе (чингизиды) относилось к «белой кости» (ақсүйек) и обладало исключительным правом занимать правящие должности." },
+            { q: "Кибиточная подать в связи с введением единого налога по реформам 60-х годов XIX века:", options: ["Была одинаковой на всех территориях империи", "Взималась один раз в три года", "Менялась в зависимости от территорий", "Не взималась с местного населения"], correct: 2, explanation: "По реформам 1867-1868 гг. размер налога варьировался: 3 рубля в одних областях и 2 рубля 75 копеек — в других." },
+            { q: "Город, в котором была создана молодежная организация «Жас казак» в 1917 году:", options: ["Семей", "Петропавловск", "Усть-Каменогорск", "Акмола"], correct: 3, explanation: "Организация «Жас казак» была создана в Акмоле в 1917 году под руководством Сакена Сейфуллина." },
+            { q: "Руководитель восстания, охватившего территорию Младшего жуза в 1783-1797 годах (согласно исторической карте):", options: ["Кенесары", "Махамбет", "Агыбай", "Сырым"], correct: 3, explanation: "В 1783-1797 гг. в Младшем жузе происходило крупное крестьянское восстание под предводительством Сырыма Датова." },
+            { q: "Государство, куда С. Датов отправился просить убежища после поражения в восстании:", options: ["Хивинское ханство", "Российская империя", "Кокандское ханство", "Цинская империя"], correct: 0, explanation: "Опасаясь преследования, Сырым Датов в 1797 году ушел со своими приближенными в пределы Хивинского ханства." },
+            { q: "Крепость, на которую напали отряды Сырыма Датова в 1792 году:", options: ["Астрахань", "Омск", "Илецкая защита", "Усть-Каменогорск"], correct: 2, explanation: "В 1792 году отряды повстанцев С. Датова предприняли попытку штурма Илецкой защиты (Елек қорғаны), но взять ее не смогли." },
+            { q: "Верное утверждение о результатах восстания Сырыма Датова:", options: ["Возвращение казахов к кочеванию на правом берегу Яика (Урала)", "Усиление кокандских походов на левом берегу", "Создание предпосылок для захвата Бухары и Хивы", "Хан Жангир был вынужден пойти на уступки"], correct: 0, explanation: "Одним из главных последствий восстания стало решение царского правительства в 1801 году разрешить казахам переходить на правобережье Урала." },
+            { q: "Основной регион восстания под предводительством Сырыма Датова:", options: ["Средний жуз", "Младший жуз", "Весь Казахстан", "Старший жуз"], correct: 1, explanation: "Восстание Сырыма Датова (1783-1797) происходило на территории Младшего жуза." },
+            { q: "Форма государственного устройства казахов, обозначенная в программе партии «Алаш»:", options: ["Конфедерация", "Империя", "Республика", "Автономия"], correct: 3, explanation: "Программа партии «Алаш» предполагала создание Казахской автономии в составе демократической федеративной Российской республики." },
+            { q: "Обязательное условие для освобождения биев и судей от должности согласно программе «Алаш»:", options: ["Личная просьба", "Следствие (расследование)", "Всенародное голосование", "Тайный донос"], correct: 1, explanation: "В документе указывалось, что бии и судьи не должны отстраняться от должности без проведения следствия." },
+            { q: "Принцип налогообложения, отраженный в программе партии «Алаш»:", options: ["Запрет на продажу земли", "Единый налог для всех", "Богатый платит больше, бедный — меньше", "Рабочих защищает закон"], correct: 2, explanation: "Партия «Алаш» выступала за прогрессивный подоходный налог: «Богатый платит больше, бедный — меньше»." },
+            { q: "Название партии, составившей данный проект программы автономии:", options: ["«Азат»", "«Алаш»", "«Уш жуз»", "«Шуро-и Ислам»"], correct: 1, explanation: "Данный текст — это выдержка из проекта программы национальной демократической партии «Алаш», опубликованного в 1917 году." },
+            { q: "Политические права граждан, гарантируемые программой партии «Алаш» (по тексту):", options: ["Издание книг", "Свобода слова", "Свобода совести", "Частная собственность"], correct: 1, explanation: "В документе подчеркивается право на «свободу проведения собраний, выступлений, издания газет», что напрямую относится к свободе слова." },
+            { q: "Основатель государства Караханидов:", options: ["Сатук Богра-хан", "Билге-каган", "Муса-каган", "Али Арслан"], correct: 0, explanation: "Основателем государства Караханидов является Сатук Богра-хан, который в 915 году принял ислам." },
+            { q: "Город, ставший первой столицей Казахского ханства (по мнению многих историков) и крупным торговым центром на Сырдарье:", options: ["Сыганак", "Туркестан", "Отырар", "Сарайчик"], correct: 0, explanation: "Сыганак был важным политическим и экономическим центром на Сырдарье и считается одной из первых столиц Казахского ханства." },
+            { q: "В каком году в Казахстане была проведена первая всеобщая перепись населения Российской империи?", options: ["1897 г.", "1867 г.", "1905 г.", "1913 г."], correct: 0, explanation: "Первая всеобщая перепись населения Российской империи, включая территорию Казахстана, прошла в 1897 году." },
+            { q: "Какое событие произошло в Казахстане в сентябре 1989 года?", options: ["Принятие закона «О языках»", "Введение национальной валюты", "Закрытие Семипалатинского полигона", "Первый полет казаха в космос"], correct: 0, explanation: "В сентябре 1989 года был принят Закон «О языках в Казахской ССР», закрепивший за казахским языком статус государственного." },
+            { q: "Первый Президент Академии наук Казахской ССР:", options: ["К. Сатпаев", "М. Ауэзов", "А. Маргулан", "Е. Бекмаханов"], correct: 0, explanation: "Каныш Сатпаев был выдающимся геологом и стал первым президентом Академии наук Казахской ССР, созданной в 1946 году." },
+            { q: "В каком году состоялся первый полет казаха в космос?", options: ["1991 г.", "1961 г.", "1994 г.", "2001 г."], correct: 0, explanation: "2 октября 1991 года Токтар Аубакиров стал первым казахом, совершившим полет в космос." },
+            { q: "Где располагалась ставка Касым хана в начале XVI века, в период наивысшего расцвета ханства?", options: ["Сыганак", "Туркестан", "Сарайчик", "Тараз"], correct: 2, explanation: "Сарайчик (Сарай-Жук) на реке Жайык (Урал) был политическим центром и ставкой Касым хана." },
+            { q: "Какой труд принадлежит выдающемуся ученому Мухаммеду Хайдару Дулати?", options: ["«Тарих-и Рашиди»", "«Диуани лугат ат-тюрк»", "«Кутадгу билик»", "«Шежире-и тюрк»"], correct: 0, explanation: "«Тарих-и Рашиди» — фундаментальный труд М.Х. Дулати, содержащий ценные сведения об истории Могулистана и Казахского ханства." },
+            { q: "Битва на реке Буланты, где казахи одержали крупную победу над джунгарами, состоялась в:", options: ["1726 (1728) году", "1723 году", "1729 (1730) году", "1710 году"], correct: 0, explanation: "Битва на реке Буланты произошла в 1726 (или 1728) году в местности Карасиыр и стала первой крупной победой над джунгарами." },
+            { q: "К какому племени относился предводитель Моде (Мете), создавший могущественную империю?", options: ["Гунны (Хунну)", "Уйсуны", "Канлы", "Саки"], correct: 0, explanation: "Моде (Мете) шаньюй был великим правителем гуннов (хунну), объединившим племена и создавшим мощную империю в конце III века до н.э." }
+        ];
+
+        /* --- СОСТОЯНИЕ ПРИЛОЖЕНИЯ --- */
+        const state = {
+            view: 'dashboard', questions: [], currentIndex: 0, answers: [],
+            isAnswerChecked: false, streak: 0, maxStreak: 0, correctCount: 0,
+            timer: 0, timerInterval: null, history: [], stats: { total: 0, avg: 0, maxCombo: 0 },
+            lastTestDetails: null // Для просмотра ошибок
+        };
+
+        const shuffle = (array) => [...array].sort(() => Math.random() - 0.5);
+        const formatTime = (seconds) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
+
+        const updateNav = () => {
+            document.querySelectorAll('.nav-btn, .nav-mob-btn').forEach(btn => {
+                btn.classList.remove('bg-slate-800', 'text-white', 'text-indigo-400');
+                if(btn.classList.contains('nav-btn')) btn.classList.add('text-slate-400');
+                if(btn.classList.contains('nav-mob-btn')) btn.classList.add('text-slate-500');
+            });
+            const desktopBtn = document.getElementById(`nav-${state.view}`);
+            const mobBtn = document.getElementById(`nav-mob-${state.view}`);
+            if (desktopBtn) { desktopBtn.classList.remove('text-slate-400'); desktopBtn.classList.add('bg-slate-800', 'text-white'); }
+            if (mobBtn) { mobBtn.classList.remove('text-slate-500'); mobBtn.classList.add('text-indigo-400'); }
+        };
+
+        window.navigate = (view) => {
+            if (state.view === 'test' && view !== 'result' && view !== 'test') { showExitModal(view); return; }
+            state.view = view; updateNav(); renderApp();
+        };
+
+        const renderApp = () => {
+            const content = document.getElementById('app-content');
+            window.scrollTo(0, 0);
+            switch (state.view) {
+                case 'dashboard': content.innerHTML = renderDashboard(); break;
+                case 'test': content.innerHTML = renderTest(); break;
+                case 'result': content.innerHTML = renderResult(); break;
+                case 'history': content.innerHTML = renderHistorySkeleton(); loadHistory().then(() => { content.innerHTML = renderHistory(); lucide.createIcons(); }); break;
+            }
+            lucide.createIcons();
+            const dbEl = document.getElementById('db-count');
+            if(dbEl) dbEl.innerText = questionBank.length;
+        };
+
+        const renderDashboard = () => `
+            <div class="fade-in max-w-4xl mx-auto space-y-8">
+                <div class="relative bg-slate-800/80 border border-slate-700 rounded-3xl p-8 overflow-hidden group">
+                    <div class="absolute top-0 right-0 w-64 h-64 bg-indigo-500/20 rounded-full blur-3xl -mr-20 -mt-20 transition-all group-hover:bg-indigo-500/30"></div>
+                    <div class="relative z-10">
+                        <div class="inline-flex items-center gap-2 px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-xs font-bold mb-4">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> База синхронизирована с облаком (${questionBank.length} вопросов)
+                        </div>
+                        <h1 class="text-3xl font-extrabold mb-3 text-white">Готов к ЕНТ? 🚀</h1>
+                        <p class="text-slate-400 text-sm md:text-base max-w-lg leading-relaxed">Выбирай предмет, тренируй память. Твоя статистика сохраняется автоматически в базе данных.</p>
+                    </div>
+                </div>
+
+                <div>
+                    <h2 class="text-xl font-bold text-slate-200 mb-5 flex items-center gap-2">
+                        <i data-lucide="layers" class="w-5 h-5 text-indigo-400"></i> Предметы
+                    </h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div onclick="startTest()" class="group bg-slate-800/60 border border-slate-700 p-6 rounded-3xl cursor-pointer hover:border-indigo-500 hover:bg-slate-800 transition-all relative overflow-hidden flex flex-col justify-between h-44 shadow-lg shadow-black/20">
+                            <div class="absolute -right-6 -bottom-6 text-slate-700/30 transform group-hover:scale-110 group-hover:-rotate-6 transition-all duration-500">
+                                <i data-lucide="landmark" class="w-40 h-40"></i>
+                            </div>
+                            <div class="relative z-10 flex items-start justify-between">
+                                <div class="w-12 h-12 bg-indigo-500/20 border border-indigo-500/30 text-indigo-400 rounded-2xl flex items-center justify-center">
+                                    <i data-lucide="landmark" class="w-6 h-6"></i>
+                                </div>
+                                <span class="bg-slate-900/80 text-slate-400 text-[10px] font-bold px-3 py-1.5 rounded-full uppercase tracking-widest border border-slate-700">
+                                    ${questionBank.length} Вопросов
+                                </span>
+                            </div>
+                            <div class="relative z-10 mt-auto">
+                                <h3 class="text-xl font-bold text-white tracking-wide">История Казахстана</h3>
+                                <div class="flex items-center text-sm font-semibold text-indigo-400 mt-2 opacity-0 group-hover:opacity-100 transition-opacity transform translate-y-2 group-hover:translate-y-0">
+                                    Пройти тест <i data-lucide="arrow-right" class="w-4 h-4 ml-1.5"></i>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-slate-800/30 border border-slate-700/50 p-6 rounded-3xl flex flex-col justify-between h-44 opacity-80 grayscale-[50%]">
+                            <div class="flex items-start justify-between">
+                                <div class="w-12 h-12 bg-slate-700/50 text-slate-500 rounded-2xl flex items-center justify-center border border-slate-700"><i data-lucide="calculator" class="w-6 h-6"></i></div>
+                                <span class="bg-slate-800 text-slate-500 text-[10px] font-bold px-3 py-1.5 rounded-full uppercase tracking-widest">Скоро</span>
+                            </div>
+                            <div class="mt-auto">
+                                <h3 class="text-xl font-bold text-slate-400">Математика</h3>
+                                <p class="text-xs font-medium text-slate-600 mt-2">В разработке...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const renderTest = () => {
+            const q = state.questions[state.currentIndex];
+            const currentNumber = state.currentIndex + 1;
+            const total = state.questions.length;
+            const progress = (currentNumber / total) * 100;
+            const isChecked = state.isAnswerChecked;
+            const userAns = state.answers[state.currentIndex];
+            const shakeClass = (isChecked && userAns !== q.correctIndex) ? 'shake' : 'fade-in';
+
+            let optionsHtml = q.options.map((opt, idx) => {
+                const isSelected = userAns === idx;
+                const isThisCorrect = idx === q.correctIndex;
+                let btnStyle = 'border-slate-700 bg-slate-800/50 hover:bg-slate-700 hover:border-slate-500 text-slate-300';
+                let iconHtml = `<div class="w-5 h-5 rounded-full border-[1.5px] border-slate-500 option-radio flex items-center justify-center mr-4 shrink-0"></div>`;
+                
+                if (isChecked) {
+                    if (isThisCorrect) {
+                        btnStyle = 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100 shadow-[0_0_15px_rgba(16,185,129,0.15)]';
+                        iconHtml = `<div class="w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center mr-3 shrink-0"><i data-lucide="check" class="w-4 h-4 text-slate-900"></i></div>`;
+                    } else if (isSelected && !isThisCorrect) {
+                        btnStyle = 'border-rose-500/50 bg-rose-500/10 text-rose-100';
+                        iconHtml = `<div class="w-6 h-6 bg-rose-500 rounded-full flex items-center justify-center mr-3 shrink-0"><i data-lucide="x" class="w-4 h-4 text-slate-900"></i></div>`;
+                    } else {
+                        btnStyle = 'border-slate-800 bg-slate-900/50 text-slate-600 opacity-50 cursor-not-allowed';
+                    }
+                } else if (isSelected) {
+                    btnStyle = 'border-indigo-500 bg-indigo-500/10 text-indigo-100';
+                    iconHtml = `<div class="w-5 h-5 rounded-full border-2 border-indigo-500 option-radio flex items-center justify-center mr-4 shrink-0"><div class="w-2.5 h-2.5 bg-indigo-500 rounded-full"></div></div>`;
+                }
+
+                return `<div onclick="${isChecked ? '' : `selectOption(${idx})`}" class="flex items-center p-4 rounded-2xl border-2 ${btnStyle} cursor-pointer transition-all mb-3 ${isChecked ? '' : 'active:scale-[0.98]'}">
+                            ${iconHtml}
+                            <span class="text-[15px] md:text-base font-medium leading-snug">${opt.text}</span>
+                        </div>`;
+            }).join('');
+
+            let explanationHtml = '';
+            if (isChecked) {
+                const isCorrect = userAns === q.correctIndex;
+                const boxColor = isCorrect ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-200' : 'border-rose-500/50 bg-rose-500/5 text-rose-200';
+                const titleColor = isCorrect ? 'text-emerald-400' : 'text-rose-400';
+                explanationHtml = `
+                    <div class="mt-6 pop-in p-5 rounded-2xl border ${boxColor}">
+                        <div class="flex items-start gap-3">
+                            <i data-lucide="${isCorrect ? 'lightbulb' : 'info'}" class="w-5 h-5 ${titleColor} shrink-0 mt-0.5"></i>
+                            <div>
+                                <strong class="${titleColor} block mb-1 tracking-wide uppercase text-xs font-extrabold">${isCorrect ? 'В точку!' : 'Запомни это'}</strong>
+                                <p class="text-sm leading-relaxed opacity-90">${q.explanation}</p>
+                            </div>
+                        </div>
+                    </div>`;
+            }
+
+            return `
+                <div class="max-w-2xl mx-auto pb-10 ${shakeClass}">
+                    <div class="flex items-center justify-between mb-8">
+                        <div class="flex gap-2">
+                            <div class="bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-xl font-bold text-sm text-slate-300">
+                                Вопрос <span class="text-white">${currentNumber}</span> <span class="text-slate-500">/ ${total}</span>
+                            </div>
+                            <div class="bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-xl font-bold text-sm text-slate-300 flex items-center gap-1.5">
+                                <i data-lucide="timer" class="w-4 h-4 text-indigo-400"></i> <span id="timer-display">${formatTime(state.timer)}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-1.5 ${state.streak > 0 ? 'text-orange-400 pop-in' : 'text-slate-600'} bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-xl font-bold text-sm transition-colors">
+                            <i data-lucide="flame" class="w-4 h-4 ${state.streak > 1 ? 'fill-orange-400' : ''}"></i> ${state.streak > 0 ? `Комбо x${state.streak}` : 'Комбо 0'}
+                        </div>
+                    </div>
+
+                    <div class="w-full bg-slate-800 rounded-full h-2 mb-8 overflow-hidden shadow-inner">
+                        <div class="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-500 ease-out" style="width: ${progress}%"></div>
+                    </div>
+
+                    <h2 class="text-xl md:text-2xl font-bold text-white mb-6 leading-relaxed bg-slate-800/40 p-5 rounded-2xl border border-slate-700/50">${q.q}</h2>
+                    <div class="space-y-0">${optionsHtml}</div>
+                    ${explanationHtml}
+
+                    <div class="mt-8 flex justify-end">
+                        ${!isChecked ? `
+                            <button onclick="checkAnswer()" class="px-8 py-3.5 rounded-2xl font-bold text-sm transition-all flex items-center gap-2
+                                ${userAns !== undefined ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-[0_0_20px_rgba(79,70,229,0.3)]' : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'}"
+                                ${userAns === undefined ? 'disabled' : ''}>Проверить <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+                            </button>
+                        ` : `
+                            <button onclick="nextQuestion()" class="px-8 py-3.5 rounded-2xl font-bold text-sm bg-white text-slate-900 hover:bg-slate-200 shadow-lg shadow-white/10 transition-all flex items-center gap-2 pop-in">
+                                ${currentNumber === total ? 'Завершить тест <i data-lucide="flag" class="w-4 h-4"></i>' : 'Дальше <i data-lucide="arrow-right" class="w-4 h-4"></i>'}
+                            </button>
+                        `}
+                    </div>
+                </div>`;
+        };
+
+        const renderResult = () => {
+            const pct = Math.round((state.correctCount / state.questions.length) * 100);
+            let fb = { msg: "Ты зверь! 🔥", color: "text-emerald-400", bg: "bg-emerald-500/20 border-emerald-500/30", icon: "crown" };
+            if(pct < 50) fb = { msg: "Надо поднажать 📚", color: "text-rose-400", bg: "bg-rose-500/20 border-rose-500/30", icon: "alert-triangle" };
+            else if(pct < 80) fb = { msg: "Хороший результат 👍", color: "text-indigo-400", bg: "bg-indigo-500/20 border-indigo-500/30", icon: "thumbs-up" };
+
+            return `
+                <div class="fade-in max-w-2xl mx-auto space-y-6 flex flex-col items-center justify-center min-h-[70vh]">
+                    <div class="w-full bg-slate-800/80 border border-slate-700 p-10 rounded-[2rem] shadow-2xl text-center relative overflow-hidden backdrop-blur-md">
+                        <div class="inline-flex items-center justify-center w-20 h-20 rounded-2xl border ${fb.bg} mb-6"><i data-lucide="${fb.icon}" class="w-10 h-10 ${fb.color}"></i></div>
+                        <h2 class="text-6xl font-extrabold text-white mb-3 tracking-tighter">${state.correctCount} <span class="text-3xl text-slate-500 font-medium">/ ${state.questions.length}</span></h2>
+                        <p class="text-xl font-bold ${fb.color} mb-6">${fb.msg}</p>
+                        
+                        <div class="flex items-center justify-center gap-2 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 py-2 px-4 rounded-xl mb-6 font-semibold max-w-xs mx-auto">
+                            <i data-lucide="check-circle" class="w-4 h-4"></i> Результат успешно сохранен в базу
+                        </div>
+
+                        <div class="flex flex-wrap justify-center gap-4 text-sm font-semibold text-slate-300 mb-8">
+                            <div class="bg-slate-900 border border-slate-700 px-5 py-3 rounded-2xl flex items-center gap-2"><i data-lucide="target" class="w-5 h-5 text-emerald-400"></i> Точность: ${pct}%</div>
+                            <div class="bg-slate-900 border border-slate-700 px-5 py-3 rounded-2xl flex items-center gap-2"><i data-lucide="timer" class="w-5 h-5 text-indigo-400"></i> Время: ${formatTime(state.timer)}</div>
+                            <div class="bg-slate-900 border border-slate-700 px-5 py-3 rounded-2xl flex items-center gap-2"><i data-lucide="flame" class="w-5 h-5 text-orange-400"></i> Макс. комбо: ${state.maxStreak}</div>
+                        </div>
+
+                        <div class="flex flex-col sm:flex-row justify-center gap-3">
+                            <button onclick="openReviewModal()" class="px-5 py-3.5 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl font-bold transition-colors w-full sm:w-auto text-sm flex items-center justify-center gap-2"><i data-lucide="file-text" class="w-4 h-4"></i> Разбор вопросов</button>
+                            <button onclick="navigate('dashboard')" class="px-5 py-3.5 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl font-bold transition-colors w-full sm:w-auto text-sm"><i data-lucide="rotate-ccw" class="w-4 h-4 inline mr-2"></i> Еще тест</button>
+                            <button onclick="navigate('history')" class="px-5 py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-bold shadow-lg shadow-indigo-600/30 transition-all w-full sm:w-auto text-sm">Статистика <i data-lucide="arrow-right" class="w-4 h-4 inline ml-1"></i></button>
+                        </div>
+                    </div>
+                </div>`;
+        };
+
+        const renderHistorySkeleton = () => `<div class="max-w-3xl mx-auto space-y-6 animate-pulse"><div class="h-8 bg-slate-800 rounded w-1/3 mb-8"></div><div class="flex gap-4 mb-8"><div class="flex-1 h-28 bg-slate-800 rounded-3xl"></div><div class="flex-1 h-28 bg-slate-800 rounded-3xl"></div></div><div class="space-y-4"><div class="h-24 bg-slate-800 rounded-3xl"></div><div class="h-24 bg-slate-800 rounded-3xl"></div></div></div>`;
+
+        const renderHistory = () => {
+            let listHtml = state.history.length === 0 ? `
+                <div class="text-center py-20 bg-slate-800/30 rounded-3xl border border-slate-700 border-dashed">
+                    <i data-lucide="ghost" class="w-12 h-12 text-slate-600 mx-auto mb-4"></i>
+                    <h3 class="text-lg font-bold text-slate-400">Тут пока тихо</h3>
+                    <button onclick="navigate('dashboard')" class="mt-6 px-6 py-3 bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 rounded-xl text-sm font-bold transition-colors">Начать тренировку</button>
+                </div>` : 
+                state.history.map((item, i) => {
+                    const d = new Date(item.date);
+                    const dateStr = `${d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} • ${d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'})}`;
+                    const pct = Math.round((item.score / item.total) * 100);
+                    let bc = pct >= 80 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : (pct >= 50 ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20' : 'text-rose-400 bg-rose-500/10 border-rose-500/20');
+                    return `
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between p-5 bg-slate-800/50 rounded-3xl border border-slate-700/80 hover:border-slate-500 transition-colors mb-4 gap-4">
+                            <div class="flex items-center gap-5">
+                                <div class="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-700 flex items-center justify-center font-extrabold text-slate-500 text-sm">#${state.history.length - i}</div>
+                                <div>
+                                    <h4 class="font-bold text-white text-base">История Казахстана</h4>
+                                    <div class="flex items-center gap-3 text-xs font-medium text-slate-400 mt-1.5"><span>${dateStr}</span><span class="w-1 h-1 rounded-full bg-slate-600"></span><span class="flex items-center"><i data-lucide="timer" class="w-3 h-3 mr-1"></i>${formatTime(item.time || 0)}</span></div>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between sm:justify-end gap-5">
+                                <div class="text-left sm:text-right"><div class="font-extrabold text-white text-lg">${item.score} <span class="text-slate-500 font-medium text-sm">/ ${item.total}</span></div></div>
+                                <div class="px-3 py-1.5 rounded-xl font-bold text-sm tracking-wide border ${bc}">${pct}%</div>
+                            </div>
+                        </div>`;
+                }).join('');
+
+            return `
+                <div class="fade-in max-w-3xl mx-auto space-y-8">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-3xl font-extrabold text-white">Твои успехи</h2>
+                        ${state.history.length > 0 ? `<button onclick="clearHistory()" class="text-xs font-bold text-rose-400 hover:text-rose-300 bg-rose-500/10 border border-rose-500/20 px-3 py-2 rounded-xl transition-colors">Очистить историю</button>` : ''}
+                    </div>
+                    <div class="grid grid-cols-2 gap-4 md:gap-6">
+                        <div class="bg-slate-800/80 p-6 rounded-3xl border border-slate-700 relative overflow-hidden">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-indigo-500/10 rounded-full blur-2xl"></div>
+                            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Средняя точность</p>
+                            <p class="text-4xl font-extrabold text-white flex items-baseline gap-1">${state.stats.avg}<span class="text-xl text-indigo-400">%</span></p>
+                        </div>
+                        <div class="bg-slate-800/80 p-6 rounded-3xl border border-slate-700 relative overflow-hidden">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-orange-500/10 rounded-full blur-2xl"></div>
+                            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Макс. Комбо</p>
+                            <p class="text-4xl font-extrabold text-white flex items-baseline gap-2">${state.stats.maxCombo} <i data-lucide="flame" class="w-6 h-6 fill-orange-400 text-orange-400"></i></p>
+                        </div>
+                    </div>
+                    <div class="mt-8"><h3 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-5">Сохраненные результаты в базе</h3>${listHtml}</div>
+                </div>`;
+        };
+
+        window.startTest = () => {
+            state.answers = []; state.currentIndex = 0; state.timer = 0;
+            state.isAnswerChecked = false; state.streak = 0; state.maxStreak = 0; state.correctCount = 0;
+            
+            const selected = shuffle([...questionBank]).slice(0, 10);
+            state.questions = selected.map(q => {
+                const optsWithMeta = q.options.map((text, i) => ({ text, isCorrect: i === q.correct }));
+                const shuffledOpts = shuffle(optsWithMeta);
+                return { q: q.q, options: shuffledOpts, correctIndex: shuffledOpts.findIndex(o => o.isCorrect), explanation: q.explanation };
+            });
+
+            navigate('test'); startTimer();
+        };
+
+        const startTimer = () => {
+            clearInterval(state.timerInterval);
+            state.timerInterval = setInterval(() => {
+                state.timer++;
+                const tEl = document.getElementById('timer-display');
+                if (tEl) tEl.innerText = formatTime(state.timer);
+            }, 1000);
+        };
+
+        window.selectOption = (idx) => { if (!state.isAnswerChecked) { state.answers[state.currentIndex] = idx; renderApp(); } };
+        window.checkAnswer = () => {
+            if (state.answers[state.currentIndex] === undefined) return;
+            state.isAnswerChecked = true;
+            if (state.answers[state.currentIndex] === state.questions[state.currentIndex].correctIndex) {
+                state.streak++; state.correctCount++; if (state.streak > state.maxStreak) state.maxStreak = state.streak;
+            } else { state.streak = 0; }
+            renderApp();
+        };
+        window.nextQuestion = () => {
+            if (state.currentIndex < state.questions.length - 1) { state.currentIndex++; state.isAnswerChecked = false; renderApp(); }
+            else { finishTest(); }
+        };
+
+        const finishTest = async () => {
+            clearInterval(state.timerInterval);
+            
+            // Сохраняем детали для разбора
+            state.lastTestDetails = state.questions.map((q, i) => ({
+                q: q.q,
+                options: q.options,
+                userAns: state.answers[i],
+                correctIdx: q.correctIndex,
+                explanation: q.explanation
+            }));
+
+            const record = { score: state.correctCount, total: state.questions.length, time: state.timer, maxStreak: state.maxStreak, date: new Date().toISOString() };
+            
+            if (user && !useLocalFallback) {
+                try { await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'history_v3'), record); } catch (e) { console.error(e); }
+            } else {
+                let localHist = JSON.parse(localStorage.getItem('entElite_history') || '[]'); localHist.push(record); localStorage.setItem('entElite_history', JSON.stringify(localHist));
+            }
+            navigate('result');
+        };
+
+        const loadHistory = async () => {
+            let data = [];
+            if (user && !useLocalFallback) {
+                try {
+                    const snap = await getDocs(collection(db, 'artifacts', appId, 'users', user.uid, 'history_v3'));
+                    snap.forEach(doc => data.push(doc.data()));
+                } catch (e) { console.error(e); }
+            } else { data = JSON.parse(localStorage.getItem('entElite_history') || '[]'); }
+            data.sort((a, b) => new Date(b.date) - new Date(a.date)); state.history = data;
+            state.stats.total = data.length;
+            if (data.length > 0) {
+                const tPct = data.reduce((acc, curr) => acc + (curr.score / curr.total), 0);
+                state.stats.avg = Math.round((tPct / data.length) * 100);
+                state.stats.maxCombo = Math.max(...data.map(d => d.maxStreak || 0));
+            } else { state.stats.avg = 0; state.stats.maxCombo = 0; }
+        };
+
+        window.clearHistory = () => {
+            if (confirm("Точно очистить всю историю результатов?")) {
+                if (useLocalFallback) {
+                    localStorage.removeItem('entElite_history');
+                }
+                state.history = [];
+                renderApp();
+            }
+        };
+
+        /* --- МОДАЛЬНОЕ ОКНО РАЗБОРА ОШИБОК --- */
+        window.openReviewModal = () => {
+            const body = document.getElementById('review-modal-body');
+            let html = '';
+            if (!state.lastTestDetails) {
+                html = `<p class="text-slate-400 text-center py-6">Нет данных последнего теста.</p>`;
+            } else {
+                html = state.lastTestDetails.map((item, idx) => {
+                    const isOk = item.userAns === item.correctIdx;
+                    const borderC = isOk ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-rose-500/30 bg-rose-500/5';
+                    const icon = isOk ? '<i data-lucide="check-circle" class="w-5 h-5 text-emerald-400 shrink-0"></i>' : '<i data-lucide="x-circle" class="w-5 h-5 text-rose-400 shrink-0"></i>';
+                    
+                    return `
+                        <div class="p-4 rounded-2xl border ${borderC} space-y-2">
+                            <div class="flex items-start gap-3">
+                                ${icon}
+                                <h4 class="font-bold text-white text-sm">${idx + 1}. ${item.q}</h4>
+                            </div>
+                            <div class="pl-8 text-xs space-y-1">
+                                <p class="text-slate-300">Твой ответ: <span class="${isOk ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}">${item.userAns !== undefined ? item.options[item.userAns].text : 'Нет ответа'}</span></p>
+                                ${!isOk ? `<p class="text-emerald-400 font-semibold">Правильно: ${item.options[item.correctIdx].text}</p>` : ''}
+                                <p class="text-slate-400 mt-2 italic bg-slate-900/50 p-2 rounded-lg">${item.explanation}</p>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            body.innerHTML = html;
+            lucide.createIcons();
+
+            const modal = document.getElementById('review-modal');
+            const content = document.getElementById('review-modal-content');
+            modal.classList.remove('hidden'); modal.classList.add('flex');
+            setTimeout(() => { modal.classList.remove('opacity-0'); content.classList.remove('scale-95'); }, 10);
+        };
+
+        window.closeReviewModal = () => {
+            const modal = document.getElementById('review-modal');
+            const content = document.getElementById('review-modal-content');
+            modal.classList.add('opacity-0'); content.classList.add('scale-95');
+            setTimeout(() => { modal.classList.add('hidden'); modal.classList.remove('flex'); }, 200);
+        };
+
+        let pendingView = null;
+        window.showExitModal = (view) => { pendingView = view; document.getElementById('exit-modal').classList.remove('hidden'); document.getElementById('exit-modal').classList.add('flex'); setTimeout(() => { document.getElementById('exit-modal').classList.remove('opacity-0'); document.getElementById('exit-modal-content').classList.remove('scale-95'); }, 10); };
+        window.closeExitModal = () => { document.getElementById('exit-modal').classList.add('opacity-0'); document.getElementById('exit-modal-content').classList.add('scale-95'); setTimeout(() => { document.getElementById('exit-modal').classList.add('hidden'); document.getElementById('exit-modal').classList.remove('flex'); pendingView = null; }, 200); };
+        window.confirmExitTest = () => { clearInterval(state.timerInterval); closeExitModal(); state.view = pendingView; pendingView = null; updateNav(); renderApp(); };
+
+        const initAuth = async () => {
+            if (useLocalFallback) return finishInit();
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+                else await signInAnonymously(auth);
+            } catch (error) { useLocalFallback = true; finishInit(); }
+        };
+        const finishInit = () => { document.getElementById('loader').style.display = 'none'; navigate('dashboard'); };
+        if (!useLocalFallback) { onAuthStateChanged(auth, (currentUser) => { user = currentUser; if (user) finishInit(); }); initAuth(); } else { finishInit(); }
+    </script>
+</body>
+</html>
